@@ -1,0 +1,116 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 16,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default",
+      "description": "Default configure using CUDA auto-detect.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "a100",
+      "displayName": "NVIDIA A100 (SM80)",
+      "description": "Configure for A100-targeted CUDA build.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build_a100",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "80",
+        "OMNICAST_ENABLE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "h100",
+      "displayName": "NVIDIA H100 (SM90)",
+      "description": "Configure for H100-targeted CUDA build.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build_h100",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "90",
+        "OMNICAST_ENABLE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "b100",
+      "displayName": "NVIDIA B100 (SM100)",
+      "description": "Configure for B100 workflow; set CMAKE_CUDA_ARCHITECTURES=100 when toolchain supports SM100.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build_b100",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "OMNICAST_ENABLE_CUDA": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "jobs": 4
+    },
+    {
+      "name": "a100",
+      "configurePreset": "a100",
+      "jobs": 4
+    },
+    {
+      "name": "h100",
+      "configurePreset": "h100",
+      "jobs": 4
+    },
+    {
+      "name": "b100",
+      "configurePreset": "b100",
+      "jobs": 4
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "a100",
+      "configurePreset": "a100",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "OMNICAST_EXPECT_SM": "80"
+      }
+    },
+    {
+      "name": "h100",
+      "configurePreset": "h100",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "OMNICAST_EXPECT_SM": "90"
+      }
+    },
+    {
+      "name": "b100",
+      "configurePreset": "b100",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "OMNICAST_EXPECT_SM": "100"
+      }
+    }
+  ]
+}
