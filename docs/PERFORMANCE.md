@@ -165,9 +165,18 @@ nb= 2048  dlag2s   7111.0 us  omc d2s   3080.7 us (2.31x) | slag2d   4666.1 us  
 ## HiCMA-X end to end
 
 See `docs/omnicast/README.md` in HiCMA-X: identical accuracy on every CTest case
-(A100, V100, H100 including FP8 tiles), conversion kernel time −26 % inside the
-GPU Cholesky (Nsight Systems), 1–2 % faster GPU factorizations, and 3–14 %
-faster CPU mixed-precision factorizations.
+(A100, V100, H100 including FP8 tiles) and conversion kernel time −26 % inside
+the GPU Cholesky (Nsight Systems, A100, N = 32768). Factorization time, three
+interleaved baseline/OmniCast runs per case:
+
+- A100 (N = 32768, NB = 1024 and 2048): 0–1.6 % faster. Conversions are 6–8 %
+  of the GPU time and overlap with GEMMs, so the gain is of the order of the
+  run-to-run spread (1–3 %); four of the nine cases were faster in every run,
+  none was slower beyond the spread.
+- CPU (36-core Xeon Gold 6140, NB = 512): stochastic rounding 13–19 % faster
+  (median, N = 8192 and 16384). The other kinds (band, adaptive, runtime
+  decisions) moved by −8 % to +1 % in median, inside the ±10 % spread of these
+  runs; more repetitions are needed to measure them.
 
 ## Profiling findings that shaped the code
 

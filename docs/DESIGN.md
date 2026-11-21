@@ -128,7 +128,8 @@ instantiations compile in parallel (35 s per architecture on 32 cores).
   5.1 µs for the same reads. The SASS had two `STG.E` per vector instead of one
   `STG.E.64`: the scalar fallback path stores to the same addresses, and NVVM
   sank both into one store with the fallback's 4-byte alignment. The 8- and
-  16-byte stores are now inline PTX (`st.global.v2/v4.u32`); 9.4 → 6.8 µs.
+  16-byte stores are now inline PTX (`st.global.v2/v4.u32`); the final kernel
+  takes 5.5 µs (nb = 1024, A100).
 - **`k_cvtT`** (transposed, for the cuBLASLt TN layout of FP8 GEMMs): 64 × 64
   tiles through shared memory with an odd-word row pitch (no bank conflicts),
   coalesced reads along the source columns and 4-byte packed stores along the
