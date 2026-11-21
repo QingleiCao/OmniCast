@@ -218,26 +218,54 @@ void transpose_block(const Plan &pl, const char *s, int64_t lds, char *d, int64_
     }
 }
 
-/* In place, one contiguous run: blocks of B elements go through an L1-sized
- * buffer, front to back when the elements shrink (or keep their size), back
- * to front when they grow, so no block overwrites input not yet read. */
+/* In place, one contiguous run.
+ *
+ * When the elements shrink, chunk [a, b) can be converted directly (no copy)
+ * as soon as its destination bytes [a so, b so) end before its source bytes
+ * [a si, b si) begin, i.e. b <= a si / so: then the destination only covers
+ * input already converted, and source and destination do not overlap. So the
+ * first H elements go through an L1-sized buffer, and the rest in chunks that
+ * grow geometrically ([H, H si/so), ...). When the elements grow, the same
+ * from the back: chunks [a, b) with a >= b si / so, then the first H through
+ * the buffer, back to front. Same-size conversions use the buffer. */
 void inplace_run(const Plan &pl, char *buf_src, char *buf_dst, size_t n, uint32_t i0, uint32_t j) {
     constexpr size_t B = 1024;
     alignas(64) char tmp[B * 8];
-    if (pl.so <= pl.si) {
-        for (size_t k = 0; k < n; k += B) {
-            const size_t m = std::min(B, n - k);
-            run1d(pl, buf_src + k * pl.si, tmp, m, i0 + (uint32_t)k, j);
-            memcpy(buf_dst + k * pl.so, tmp, m * pl.so);
+    const size_t si = pl.si, so = pl.so;
+    auto via_buffer_forward = [&](size_t lo, size_t hi) {
+        for (size_t k = lo; k < hi; k += B) {
+            const size_t m = std::min(B, hi - k);
+            run1d(pl, buf_src + k * si, tmp, m, i0 + (uint32_t)k, j);
+            memcpy(buf_dst + k * so, tmp, m * so);
         }
-    } else {
-        size_t k = n;
+    };
+    if (so < si) {
+        const size_t H = std::min(n, B);
+        via_buffer_forward(0, H);
+        size_t a = H;
+        while (a < n) {
+            const size_t b = std::min(n, a * si / so);
+            run1d(pl, buf_src + a * si, buf_dst + a * so, b - a, i0 + (uint32_t)a, j);
+            a = b;
+        }
+    } else if (so > si) {
+        const size_t H = std::min(n, B);
+        size_t b = n;
+        while (b > H) {
+            size_t a = (b * si + so - 1) / so;         /* ceil(b si / so) */
+            if (a < H) a = H;
+            run1d(pl, buf_src + a * si, buf_dst + a * so, b - a, i0 + (uint32_t)a, j);
+            b = a;
+        }
+        size_t k = H;
         while (k > 0) {
             const size_t m = std::min(B, k);
             k -= m;
-            run1d(pl, buf_src + k * pl.si, tmp, m, i0 + (uint32_t)k, j);
-            memcpy(buf_dst + k * pl.so, tmp, m * pl.so);
+            run1d(pl, buf_src + k * si, tmp, m, i0 + (uint32_t)k, j);
+            memcpy(buf_dst + k * so, tmp, m * so);
         }
+    } else {
+        via_buffer_forward(0, n);
     }
 }
 

@@ -34,37 +34,84 @@ template <> struct Zero<bf16> { __device__ __forceinline__ static bf16 get() { r
 template <> struct Zero<e4m3> { __device__ __forceinline__ static e4m3 get() { return make<e4m3>(0); } };
 template <> struct Zero<e5m2> { __device__ __forceinline__ static e5m2 get() { return make<e5m2>(0); } };
 
-template <class S, class D> struct Items {
-    static constexpr int a = 16 / (int)sizeof(S), b = 16 / (int)sizeof(D);
-    static constexpr int value = a > b ? a : b;
+/** Elements per vector: 16 bytes of the wider type */
+template <class S, class D> struct Vw {
+    static constexpr int ws = (int)(sizeof(S) > sizeof(D) ? sizeof(S) : sizeof(D));
+    static constexpr int value = 16 / ws;
 };
+constexpr int kRounds = 4;     /* vectors per thread (in flight together) */
 
-template <class T, int N>
-union VecU {
-    static constexpr int W = (int)(N * sizeof(T) / 16);
-    uint4 w[W];
-    T     v[N];
-};
-
-template <class T, int N>
-__device__ __forceinline__ void vload(const T *p, T (&v)[N]) {
-    static_assert((N * sizeof(T)) % 16 == 0, "vector of 16-byte words");
-    VecU<T, N> u;
-    const uint4 *q = reinterpret_cast<const uint4 *>(p);
-#pragma unroll
-    for (int k = 0; k < VecU<T, N>::W; k++) u.w[k] = q[k];
-#pragma unroll
-    for (int k = 0; k < N; k++) v[k] = u.v[k];
+/* N consecutive elements as ONE aligned load / store of N * sizeof(T) bytes.
+ * The 32-bit words are assembled explicitly: through a union the compiler
+ * split 8-byte stores of two floats into two 4-byte stores. */
+template <class T> __device__ __forceinline__ uint32_t bits32(T v) {
+    uint32_t u = 0; memcpy(&u, &v, sizeof(T)); return u;
+}
+template <class T> __device__ __forceinline__ T from_bits32(uint32_t u) {
+    T v; memcpy(&v, &u, sizeof(T)); return v;
 }
 
 template <class T, int N>
+__device__ __forceinline__ void pack_words(const T (&v)[N], uint32_t (&w)[(N * sizeof(T) + 3) / 4]) {
+    if constexpr (sizeof(T) >= 4) {
+#pragma unroll
+        for (int k = 0; k < N; k++) memcpy(&w[k * sizeof(T) / 4], &v[k], sizeof(T));
+    } else {
+        constexpr int PER = 4 / (int)sizeof(T);
+#pragma unroll
+        for (int i = 0; i < (N * (int)sizeof(T) + 3) / 4; i++) {
+            uint32_t x = 0;
+#pragma unroll
+            for (int q = 0; q < PER; q++)
+                if (i * PER + q < N) x |= bits32(v[i * PER + q]) << (8 * (int)sizeof(T) * q);
+            w[i] = x;
+        }
+    }
+}
+template <class T, int N>
+__device__ __forceinline__ void unpack_words(const uint32_t (&w)[(N * sizeof(T) + 3) / 4], T (&v)[N]) {
+    if constexpr (sizeof(T) >= 4) {
+#pragma unroll
+        for (int k = 0; k < N; k++) memcpy(&v[k], &w[k * sizeof(T) / 4], sizeof(T));
+    } else {
+        constexpr int PER = 4 / (int)sizeof(T);
+        constexpr uint32_t mask = (sizeof(T) == 1) ? 0xffu : 0xffffu;
+#pragma unroll
+        for (int k = 0; k < N; k++) v[k] = from_bits32<T>((w[k / PER] >> (8 * (int)sizeof(T) * (k % PER))) & mask);
+    }
+}
+
+template <class T, int N>
+__device__ __forceinline__ void vload(const T *p, T (&v)[N]) {
+    constexpr int B = N * (int)sizeof(T);
+    uint32_t w[(B + 3) / 4];
+    if constexpr (B == 16) { const uint4 x = *reinterpret_cast<const uint4 *>(p); w[0] = x.x; w[1] = x.y; w[2] = x.z; w[3] = x.w; }
+    else if constexpr (B == 8) { const uint2 x = *reinterpret_cast<const uint2 *>(p); w[0] = x.x; w[1] = x.y; }
+    else if constexpr (B == 4) { w[0] = *reinterpret_cast<const uint32_t *>(p); }
+    else if constexpr (B == 2) { w[0] = *reinterpret_cast<const uint16_t *>(p); }
+    else { w[0] = *reinterpret_cast<const uint8_t *>(p); }
+    unpack_words<T, N>(w, v);
+}
+/* 8- and 16-byte stores in inline PTX: the scalar fallback path stores to the
+ * same addresses, and NVVM otherwise sinks both into one store with the
+ * alignment of the fallback (two st.global.u32 instead of one v2). */
+template <class T, int N>
 __device__ __forceinline__ void vstore(T *p, const T (&v)[N]) {
-    VecU<T, N> u;
-#pragma unroll
-    for (int k = 0; k < N; k++) u.v[k] = v[k];
-    uint4 *q = reinterpret_cast<uint4 *>(p);
-#pragma unroll
-    for (int k = 0; k < VecU<T, N>::W; k++) q[k] = u.w[k];
+    constexpr int B = N * (int)sizeof(T);
+    uint32_t w[(B + 3) / 4];
+    pack_words<T, N>(v, w);
+#if defined(__CUDA_ARCH__)
+    if constexpr (B == 16)
+        asm volatile("st.global.v4.u32 [%0], {%1, %2, %3, %4};" :: "l"(p), "r"(w[0]), "r"(w[1]), "r"(w[2]), "r"(w[3]) : "memory");
+    else if constexpr (B == 8)
+        asm volatile("st.global.v2.u32 [%0], {%1, %2};" :: "l"(p), "r"(w[0]), "r"(w[1]) : "memory");
+#else
+    if constexpr (B == 16) *reinterpret_cast<uint4 *>(p) = make_uint4(w[0], w[1], w[2], w[3]);
+    else if constexpr (B == 8) *reinterpret_cast<uint2 *>(p) = make_uint2(w[0], w[1]);
+#endif
+    else if constexpr (B == 4) *reinterpret_cast<uint32_t *>(p) = w[0];
+    else if constexpr (B == 2) *reinterpret_cast<uint16_t *>(p) = (uint16_t)w[0];
+    else *reinterpret_cast<uint8_t *>(p) = (uint8_t)w[0];
 }
 
 /** The element function of a kernel */
@@ -82,53 +129,101 @@ struct ElemOp {
 
 /* ------------------------------------------------------------------------ */
 
+/* Rows of a column are split in block tiles of blockDim.x * VW * kRounds
+ * elements; in round r, thread t converts the VW elements at
+ * (r * blockDim.x + t) * VW, so every load and store instruction of a warp
+ * covers one contiguous range, on both the narrow and the wide side. */
 template <class S, class D, int MODE>
 __global__ void __launch_bounds__(kThreads)
 k_cvt(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int64_t dr, int64_t dc,
       ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index, int vec) {
-    constexpr int IT = Items<S, D>::value;
+    constexpr int VW = Vw<S, D>::value;
     if (MODE == MODE_SCALED && scale_ptr) op.scale = scale_ptr[scale_index];
-    const int64_t i0 = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * IT;
-    if (i0 >= dr) return;
+    const int64_t tile0 = (int64_t)blockIdx.x * blockDim.x * VW * kRounds;
+    if (tile0 >= dr) return;
     for (int64_t j = (int64_t)blockIdx.y * blockDim.y + threadIdx.y; j < dc; j += (int64_t)gridDim.y * blockDim.y) {
+        const S *srow = src + j * lds;
         D *drow = dst + j * ldd;
-        if (vec && j < n && i0 + IT <= m) {
-            S v[IT];
-            vload(src + j * lds + i0, v);
-            D w[IT];
+        const bool jin = j < n;
+        S v[kRounds][VW];
+        bool full[kRounds];
 #pragma unroll
-            for (int k = 0; k < IT; k++) w[k] = op(v[k], (uint32_t)(i0 + k), (uint32_t)j);
-            vstore(drow + i0, w);
-        } else {
+        for (int r = 0; r < kRounds; r++) {
+            const int64_t i = tile0 + ((int64_t)r * blockDim.x + threadIdx.x) * VW;
+            full[r] = vec && jin && (i + VW <= m);
+            if (full[r]) vload(srow + i, v[r]);
+        }
 #pragma unroll
-            for (int k = 0; k < IT; k++) {
-                const int64_t i = i0 + k;
-                if (i < dr)
-                    drow[i] = (i < m && j < n) ? op(src[j * lds + i], (uint32_t)i, (uint32_t)j) : Zero<D>::get();
+        for (int r = 0; r < kRounds; r++) {
+            const int64_t i = tile0 + ((int64_t)r * blockDim.x + threadIdx.x) * VW;
+            if (full[r]) {
+                D w[VW];
+#pragma unroll
+                for (int k = 0; k < VW; k++) w[k] = op(v[r][k], (uint32_t)(i + k), (uint32_t)j);
+                vstore(drow + i, w);
+            } else {
+#pragma unroll
+                for (int k = 0; k < VW; k++) {
+                    const int64_t ii = i + k;
+                    if (ii < dr)
+                        drow[ii] = (ii < m && jin) ? op(srow[ii], (uint32_t)ii, (uint32_t)j) : Zero<D>::get();
+                }
             }
         }
     }
 }
 
+/* 64 x 64 tiles. Read: 64 threads along the source rows, 4 source columns
+ * per pass. The tile is kept as tile[source row][source column] with a row
+ * pitch of 64 elements plus 4 bytes (8 for 8-byte types): an odd number of
+ * bank words, and aligned for the element and the 4-byte writes. Write:
+ * each thread stores W = 4 / sizeof(D) consecutive destination elements (one
+ * 4-byte word for FP8 and 16-bit targets). */
+template <class D> struct TP {
+    static constexpr int W     = sizeof(D) >= 4 ? 1 : (int)(4 / sizeof(D));
+    static constexpr int pitch = (int)(64 * sizeof(D) + (sizeof(D) > 4 ? sizeof(D) : 4));    /* bytes */
+};
+
 template <class S, class D, int MODE>
 __global__ void __launch_bounds__(kThreads)
 k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int64_t dr, int64_t dc,
-       ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index) {
-    __shared__ D tile[32][33];
+       ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index, int vec) {
+    constexpr int W = TP<D>::W, P = TP<D>::pitch;
+    __shared__ __align__(16) unsigned char tile_raw[64 * P];
     if (MODE == MODE_SCALED && scale_ptr) op.scale = scale_ptr[scale_index];
-    const int tx = threadIdx.x, ty = threadIdx.y;          /* 32 x 8 */
-    const int64_t i0 = (int64_t)blockIdx.x * 32;            /* source rows = dst columns */
-    for (int64_t j0 = (int64_t)blockIdx.y * 32; j0 < dr; j0 += (int64_t)gridDim.y * 32) {   /* source columns = dst rows */
-#pragma unroll
-        for (int k = 0; k < 32; k += 8) {
-            const int64_t i = i0 + tx, j = j0 + ty + k;
-            tile[ty + k][tx] = (i < m && j < n) ? op(src[j * lds + i], (uint32_t)i, (uint32_t)j) : Zero<D>::get();
+    const int t = threadIdx.x;
+    const int64_t i0 = (int64_t)blockIdx.x * 64;            /* source rows = dst columns */
+    for (int64_t j0 = (int64_t)blockIdx.y * 64; j0 < dr; j0 += (int64_t)gridDim.y * 64) {   /* source columns = dst rows */
+        {   /* read: thread (ti = t % 64, tj = t / 64), columns tj, tj + 4, ... */
+            const int ti = t & 63, tj = t >> 6;
+            const int64_t i = i0 + ti;
+#pragma unroll 4
+            for (int jj = tj; jj < 64; jj += 4) {
+                const int64_t j = j0 + jj;
+                const D v = (i < m && j < n) ? op(src[j * lds + i], (uint32_t)i, (uint32_t)j) : Zero<D>::get();
+                *reinterpret_cast<D *>(tile_raw + ti * P + jj * (int)sizeof(D)) = v;
+            }
         }
         __syncthreads();
+        {   /* write: 64 / W threads per destination column */
+            constexpr int TPC = 64 / W;              /* threads per column */
+            constexpr int CPP = kThreads / TPC;      /* columns per pass */
+            const int tr = t % TPC, tc = t / TPC;
+            const int64_t r0 = j0 + (int64_t)tr * W;
+#pragma unroll 4
+            for (int cc = tc; cc < 64; cc += CPP) {
+                const int64_t c = i0 + cc;
+                if (c >= dc) break;
+                const unsigned char *tp = tile_raw + cc * P + tr * W * (int)sizeof(D);
+                D *dp = dst + c * ldd + r0;
+                if (W > 1 && vec && r0 + W <= dr) {
+                    *reinterpret_cast<uint32_t *>(dp) = *reinterpret_cast<const uint32_t *>(tp);
+                } else {
 #pragma unroll
-        for (int k = 0; k < 32; k += 8) {
-            const int64_t c = i0 + ty + k, r = j0 + tx;
-            if (c < dc && r < dr) dst[c * ldd + r] = tile[tx][ty + k];
+                    for (int k = 0; k < W; k++)
+                        if (r0 + k < dr) dp[k] = *reinterpret_cast<const D *>(tp + k * (int)sizeof(D));
+                }
+            }
         }
         __syncthreads();
     }
@@ -138,8 +233,8 @@ template <class S, class D, int MODE>
 __global__ void __launch_bounds__(kThreads)
 k_inplace(char *buf, int64_t count, int64_t m, ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index,
           uint32_t *ws, uint32_t nchunks) {
-    constexpr int IT = Items<S, D>::value;
-    constexpr int64_t C = (int64_t)kThreads * IT;
+    constexpr int VW = Vw<S, D>::value;
+    constexpr int64_t C = (int64_t)kThreads * VW * kRounds;
     constexpr bool shrink = sizeof(D) < sizeof(S);
     __shared__ uint32_t s_ticket;
     __shared__ int s_last;
@@ -149,25 +244,27 @@ k_inplace(char *buf, int64_t count, int64_t m, ElemOp<S, D, MODE> op, const floa
     const uint32_t chunk = shrink ? s_ticket : (nchunks - 1u - s_ticket);
     const S *src = reinterpret_cast<const S *>(buf);
     D *dst = reinterpret_cast<D *>(buf);
-    const int64_t e0 = (int64_t)chunk * C + (int64_t)threadIdx.x * IT;
-    const bool full = e0 + IT <= count;
-    /* position (i, j) for stochastic rounding: column-major m-by-(count/m) */
-    uint32_t ci = 0, cj = 0;
-    if (MODE == MODE_SR) { const int64_t jj = e0 / m; cj = (uint32_t)jj; ci = (uint32_t)(e0 - jj * m); }
-    D w[IT];
-    if (full) {
-        S v[IT];
-        vload(src + e0, v);
+    const int64_t c0 = (int64_t)chunk * C;
+    D w[kRounds][VW];
 #pragma unroll
-        for (int k = 0; k < IT; k++) {
-            w[k] = op(v[k], ci, cj);
-            if (MODE == MODE_SR) { if (++ci == (uint32_t)m) { ci = 0; cj++; } }
-        }
-    } else {
+    for (int r = 0; r < kRounds; r++) {
+        const int64_t e0 = c0 + ((int64_t)r * kThreads + threadIdx.x) * VW;
+        uint32_t ci = 0, cj = 0;      /* position for stochastic rounding (column-major, m rows) */
+        if (MODE == MODE_SR) { const int64_t jj = e0 / m; cj = (uint32_t)jj; ci = (uint32_t)(e0 - jj * m); }
+        if (e0 + VW <= count) {
+            S v[VW];
+            vload(src + e0, v);
 #pragma unroll
-        for (int k = 0; k < IT; k++) {
-            if (e0 + k < count) w[k] = op(src[e0 + k], ci, cj);
-            if (MODE == MODE_SR) { if (++ci == (uint32_t)m) { ci = 0; cj++; } }
+            for (int k = 0; k < VW; k++) {
+                w[r][k] = op(v[k], ci, cj);
+                if (MODE == MODE_SR) { if (++ci == (uint32_t)m) { ci = 0; cj++; } }
+            }
+        } else {
+#pragma unroll
+            for (int k = 0; k < VW; k++) {
+                if (e0 + k < count) w[r][k] = op(src[e0 + k], ci, cj);
+                if (MODE == MODE_SR) { if (++ci == (uint32_t)m) { ci = 0; cj++; } }
+            }
         }
     }
     __syncthreads();                       /* the whole chunk is in registers */
@@ -176,8 +273,8 @@ k_inplace(char *buf, int64_t count, int64_t m, ElemOp<S, D, MODE> op, const floa
         __threadfence();
         atomicExch(&flags[chunk], 1u);
         /* input chunks overlapped by this chunk's output */
-        const int64_t ob0 = (int64_t)chunk * C * (int64_t)sizeof(D);
-        const int64_t e1  = ((int64_t)chunk + 1) * C < count ? ((int64_t)chunk + 1) * C : count;
+        const int64_t ob0 = c0 * (int64_t)sizeof(D);
+        const int64_t e1  = c0 + C < count ? c0 + C : count;
         const int64_t ob1 = e1 * (int64_t)sizeof(D);
         const int64_t cb  = C * (int64_t)sizeof(S);
         uint32_t lo = (uint32_t)(ob0 / cb), hi = (uint32_t)((ob1 - 1) / cb);
@@ -188,11 +285,15 @@ k_inplace(char *buf, int64_t count, int64_t m, ElemOp<S, D, MODE> op, const floa
         __threadfence();
     }
     __syncthreads();
-    if (full) {
-        vstore(dst + e0, w);
-    } else {
 #pragma unroll
-        for (int k = 0; k < IT; k++) if (e0 + k < count) dst[e0 + k] = w[k];
+    for (int r = 0; r < kRounds; r++) {
+        const int64_t e0 = c0 + ((int64_t)r * kThreads + threadIdx.x) * VW;
+        if (e0 + VW <= count) {
+            vstore(dst + e0, w[r]);
+        } else {
+#pragma unroll
+            for (int k = 0; k < VW; k++) if (e0 + k < count) dst[e0 + k] = w[r][k];
+        }
     }
     __syncthreads();
     if (threadIdx.x == 0) {
@@ -209,13 +310,26 @@ k_inplace(char *buf, int64_t count, int64_t m, ElemOp<S, D, MODE> op, const floa
 
 template <class S>
 __global__ void __launch_bounds__(kThreads)
-k_amax(const S *src, int64_t lds, int64_t m, int64_t n, uint32_t *ws, float *out, int write_scale, float target) {
+k_amax(const S *src, int64_t lds, int64_t m, int64_t n, uint32_t *ws, float *out, int write_scale, float target, int vec) {
+    constexpr int VW = 16 / (int)sizeof(S);
     __shared__ float red[kThreads];
     __shared__ int s_last;
     float mx = 0.0f;
-    for (int64_t j = blockIdx.y; j < n; j += gridDim.y)
-        for (int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; i < m; i += (int64_t)gridDim.x * blockDim.x)
-            mx = fmaxf(mx, abs_f32(src[j * lds + i]));
+    for (int64_t j = blockIdx.y; j < n; j += gridDim.y) {
+        const S *col = src + j * lds;
+        int64_t i = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * VW;
+        const int64_t stride = (int64_t)gridDim.x * blockDim.x * VW;
+        if (vec) {
+            for (; i + VW <= m; i += stride) {
+                S v[VW];
+                vload(col + i, v);
+#pragma unroll
+                for (int k = 0; k < VW; k++) mx = fmaxf(mx, abs_f32(v[k]));
+            }
+        }
+        for (; i < m; i += stride)
+            for (int k = 0; k < VW && i + k < m; k++) mx = fmaxf(mx, abs_f32(col[i + k]));
+    }
     red[threadIdx.x] = mx;
     __syncthreads();
     for (int s = kThreads / 2; s > 0; s >>= 1) {
@@ -269,14 +383,14 @@ omc_status_t launch_mode(const LaunchArgs &a) {
     op.o = ElemOpts{a.sat, a.rne};
     op.scale = a.scale;
     op.seed = a.seed;
-    constexpr int IT = Items<S, D>::value;
+    constexpr int VW = Vw<S, D>::value;
     const S *src = static_cast<const S *>(a.src);
     D *dst = static_cast<D *>(a.dst);
     switch (a.op) {
     case OP_CVT: {
         const int vec = aligned16(src) && aligned16(dst) &&
                         (a.n <= 1 || (((a.lds * (int64_t)sizeof(S)) % 16) == 0 && ((a.ldd * (int64_t)sizeof(D)) % 16) == 0));
-        const int64_t groups = (a.dr + IT - 1) / IT;      /* thread groups along a column */
+        const int64_t groups = (a.dr + VW * kRounds - 1) / (VW * kRounds);   /* threads needed along a column */
         int tx = 32;
         while (tx < kThreads && tx < groups) tx *= 2;
         const int ty = kThreads / tx;
@@ -289,12 +403,13 @@ omc_status_t launch_mode(const LaunchArgs &a) {
         return check_launch();
     }
     case OP_TRANSPOSE: {
-        const int64_t gx = (a.dc + 31) / 32;
-        int64_t gy = (a.dr + 31) / 32;
+        const int64_t gx = (a.dc + 63) / 64;
+        int64_t gy = (a.dr + 63) / 64;
         if (gy > 65535) gy = 65535;
         if (gx > 0x7fffffff) return OMC_ERROR_NOT_SUPPORTED;
-        k_cvtT<S, D, MODE><<<dim3((unsigned)gx, (unsigned)gy), dim3(32, 8), 0, a.stream>>>(
-            src, a.lds, dst, a.ldd, a.m, a.n, a.dr, a.dc, op, a.scale_ptr, a.scale_index);
+        const int vec = (((uintptr_t)dst & 3u) == 0) && (((a.ldd * (int64_t)sizeof(D)) & 3) == 0);
+        k_cvtT<S, D, MODE><<<dim3((unsigned)gx, (unsigned)gy), kThreads, 0, a.stream>>>(
+            src, a.lds, dst, a.ldd, a.m, a.n, a.dr, a.dc, op, a.scale_ptr, a.scale_index, vec);
         return check_launch();
     }
     case OP_INPLACE: {
@@ -302,7 +417,7 @@ omc_status_t launch_mode(const LaunchArgs &a) {
             return OMC_ERROR_NOT_SUPPORTED;    /* the API layer uses k_cvt in place */
         } else {
             const int64_t count = a.m * a.n;
-            const int64_t C = (int64_t)kThreads * IT;
+            const int64_t C = (int64_t)kThreads * VW * kRounds;
             const int64_t nchunks = (count + C - 1) / C;
             if (!aligned16(a.dst)) return OMC_ERROR_INVALID_VALUE;
             if (nchunks > 0x7fffffff || (size_t)(nchunks + kFlagsOffset) * 4 > a.ws_bytes) return OMC_ERROR_INVALID_VALUE;
@@ -336,16 +451,18 @@ template <class S>
 omc_status_t launch_for_src(const LaunchArgs &a) {
     if (a.op == OP_AMAX) {
         if constexpr (Traits<S>::is_float) {
-            int64_t gx = (a.m + kThreads - 1) / kThreads;
-            if (gx > 32) gx = 32;
+            constexpr int AV = 16 / (int)sizeof(S);
+            int64_t gx = (a.m + kThreads * AV - 1) / (kThreads * AV);
+            if (gx > 64) gx = 64;
             if (gx < 1) gx = 1;
             int64_t gy = kMaxAmaxBlocks / gx;
             if (gy > a.n) gy = a.n;
             if (gy < 1) gy = 1;
             if ((size_t)(kMaxAmaxBlocks + 4) * 4 > a.ws_bytes) return OMC_ERROR_INVALID_VALUE;
+            const int vec = aligned16(a.src) && (a.n <= 1 || ((a.lds * (int64_t)sizeof(S)) % 16) == 0);
             k_amax<S><<<dim3((unsigned)gx, (unsigned)gy), kThreads, 0, a.stream>>>(
                 static_cast<const S *>(a.src), a.lds, a.m, a.n, static_cast<uint32_t *>(a.ws),
-                a.amax_out, a.amax_scale, a.scale_max);
+                a.amax_out, a.amax_scale, a.scale_max, vec);
             return check_launch();
         } else {
             return OMC_ERROR_NOT_SUPPORTED;

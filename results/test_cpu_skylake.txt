@@ -1,0 +1,9 @@
+OmniCast 2.0.0, CPU path avx512, GPU backend cuda
+  [generic] all 196 pairs x 3 option sets: 3790248 elements checked
+  [avx2] all 196 pairs x 3 option sets: 3790248 elements checked
+  [avx512] all 196 pairs x 3 option sets: 3790248 elements checked
+  stochastic rounding: bit-identical to HiCMA-X 0.2 (fp64->fp32, fp64->fp16, fp32->fp16), unbiased
+  2-D / transpose / padding: 720 cases
+  in place (1-D and 2-D, every pair): 1372 cases
+  scaling, amax, threads, scalars, errors: ok
+PASSED

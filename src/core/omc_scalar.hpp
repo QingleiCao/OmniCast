@@ -441,7 +441,10 @@ OMC_HD uint64_t splitmix64(uint64_t x) {
  *  seed and the bits of the value: independent of how the work is split. */
 OMC_HD float sr_u01(uint32_t i, uint32_t j, uint64_t seed, uint64_t bits) {
     const uint64_t pos = (uint64_t)i | ((uint64_t)j << 32);
-    return (float)(splitmix64(bits ^ splitmix64(pos ^ seed)) >> 40) * (1.0f / 16777216.0f);
+    /* a 24-bit integer: converted through int32 (exact, and AVX2 has no
+     * vector uint64 -> float conversion) */
+    const int32_t r = (int32_t)(uint32_t)(splitmix64(bits ^ splitmix64(pos ^ seed)) >> 40);
+    return (float)r * (1.0f / 16777216.0f);
 }
 
 template <class S> OMC_HD uint64_t sr_bits(S s);
@@ -451,6 +454,11 @@ template <> OMC_HD uint64_t sr_bits<f16>(f16 s)       { return (uint64_t)s.bits;
 template <> OMC_HD uint64_t sr_bits<bf16>(bf16 s)     { return (uint64_t)s.bits; }
 
 OMC_HD float nextup_f32(float x)   { return u2f(f2u(x) + 1u); }   /* x >= 0 finite */
+/** (u - a) / step for a power of two step: the product by 1/step is the
+ *  same correctly rounded number as the quotient, without a division */
+OMC_HD double div_pow2(double num, double step) {
+    return num * u2d(0x7fe0000000000000ULL - d2u(step));
+}
 OMC_HD float nextdown_f32(float x) { return u2f(f2u(x) - 1u); }   /* x > 0 */
 
 /** FP32 target: round down with probability (upper - a) / (upper - lower).
@@ -464,12 +472,21 @@ OMC_HD float sr_f32(double value, float random) {
     const bool gt = a > (double)n, lt = a < (double)n;
     const float lower = gt ? n : u2f(nb - 1u);
     const float upper = gt ? u2f(nb + 1u) : n;
-    const double p_lower = ((double)upper - a) / ((double)upper - (double)lower);
+    const double p_lower = div_pow2((double)upper - a, (double)upper - (double)lower);
     float r = (random < p_lower) ? lower : upper;
     r = (value < 0.0) ? -r : r;
     const bool fin = ((d2u(value) & 0x7fffffffffffffffULL) < 0x7ff0000000000000ULL)
                    & (nb < 0x7f800000u) & (f2u(upper) < 0x7f800000u);
     return (fin & (gt | lt)) ? r : nearest;
+}
+
+/** FP16 code -> FP32: the hardware convert on GPUs */
+OMC_HD float f16_bits_to_f32(uint32_t h) {
+#if defined(OMC_ON_DEVICE)
+    return __half2float(__ushort_as_half((unsigned short)h));
+#else
+    return dec_f32<FmtF16>(h);
+#endif
 }
 
 /** FP16 target, as HiCMA-X 0.2 (including its round-to-nearest through FP32
@@ -485,10 +502,10 @@ OMC_HD uint32_t sr_f16(double value, float random, bool sat) {
     const uint32_t lo_s = (uint32_t)(int32_t)(as * 16777216.0);
     const bool top = a >= 65504.0;
     const uint32_t lo = top ? 0x7bffu : ((a < 6.103515625e-05) ? lo_s : lo_n);
-    const double lv = (double)dec_f32<FmtF16>(lo);
+    const double lv = (double)f16_bits_to_f32(lo);
     const uint32_t up = lo + 1u;
-    const double uv = (double)dec_f32<FmtF16>(up);
-    const double p_lower = (uv - a) / (uv - lv);
+    const double uv = (double)f16_bits_to_f32(up);
+    const double p_lower = div_pow2(uv - a, uv - lv);
     uint32_t r = ((random < p_lower) ? lo : up) | sign;
     r = (lv == a) ? (lo | sign) : r;
     r = (top & (lv != a)) ? enc_f32<FmtF16>((float)value, sat) : r;   /* above the largest half */

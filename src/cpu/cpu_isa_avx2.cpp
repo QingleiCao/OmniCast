@@ -170,6 +170,91 @@ static void d2small(const void *src, void *dst, size_t n, const KParams &p) {
     }
 }
 
+
+/* ---- float -> integer (truncation), saturating, NaN -> 0 ----------------- */
+/* Clamp in the source precision to [lo, hi], zero the NaNs, truncate with
+ * cvtt (exact for in-range values), then narrow with saturating packs. */
+static inline __m256i clamp_cvt_ps(__m256 x, float lo, float hi) {
+    x = _mm256_and_ps(x, _mm256_cmp_ps(x, x, _CMP_EQ_OQ));          /* NaN -> 0 */
+    x = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(lo)), _mm256_set1_ps(hi));
+    return _mm256_cvttps_epi32(x);
+}
+static inline __m128i clamp_cvt_pd(__m256d x, double lo, double hi) {
+    x = _mm256_and_pd(x, _mm256_cmp_pd(x, x, _CMP_EQ_OQ));
+    x = _mm256_min_pd(_mm256_max_pd(x, _mm256_set1_pd(lo)), _mm256_set1_pd(hi));
+    return _mm256_cvttpd_epi32(x);
+}
+/* 32 int32 (4 x 8) -> 32 int8 / int16 in order */
+static inline __m256i pack32_i8(__m256i a, __m256i b, __m256i c, __m256i d) {
+    const __m256i ab = _mm256_packs_epi32(a, b), cd = _mm256_packs_epi32(c, d);   /* per-lane order */
+    const __m256i r = _mm256_packs_epi16(ab, cd);
+    return _mm256_permutevar8x32_epi32(r, _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
+}
+static inline __m256i pack16_i16(__m256i a, __m256i b) {
+    return _mm256_permute4x64_epi64(_mm256_packs_epi32(a, b), 0xd8);
+}
+
+template <class D>
+static void s2int(const void *src, void *dst, size_t n, const KParams &p) {
+    if (p.eo.rne) { k_cvt<D, float>(src, dst, n, p); return; }
+    const float *s = (const float *)src; D *d = (D *)dst;
+    const float lo = (float)IntLimits<D>::lo, hi = (float)IntLimits<D>::hi;
+    size_t k = 0;
+    if (sizeof(D) == 1) {
+        for (; k + 32 <= n; k += 32) {
+            const __m256i r = pack32_i8(clamp_cvt_ps(_mm256_loadu_ps(s + k), lo, hi), clamp_cvt_ps(_mm256_loadu_ps(s + k + 8), lo, hi),
+                                        clamp_cvt_ps(_mm256_loadu_ps(s + k + 16), lo, hi), clamp_cvt_ps(_mm256_loadu_ps(s + k + 24), lo, hi));
+            _mm256_storeu_si256((__m256i *)(d + k), r);
+        }
+    } else if (sizeof(D) == 2) {
+        for (; k + 16 <= n; k += 16) {
+            const __m256i r = pack16_i16(clamp_cvt_ps(_mm256_loadu_ps(s + k), lo, hi), clamp_cvt_ps(_mm256_loadu_ps(s + k + 8), lo, hi));
+            _mm256_storeu_si256((__m256i *)(d + k), r);
+        }
+    } else {
+        /* int32: 2^31 - 1 is not a float; values >= 2^31 clamp to 2^31 and
+         * cvtt gives 0x80000000: fix those up to INT32_MAX */
+        for (; k + 8 <= n; k += 8) {
+            __m256 x = _mm256_loadu_ps(s + k);
+            const __m256 big = _mm256_cmp_ps(x, _mm256_set1_ps(2147483648.0f), _CMP_GE_OQ);
+            __m256i r = clamp_cvt_ps(x, -2147483648.0f, 2147483648.0f);
+            r = _mm256_blendv_epi8(r, _mm256_set1_epi32(0x7fffffff), _mm256_castps_si256(big));
+            _mm256_storeu_si256((__m256i *)(d + k), r);
+        }
+    }
+    const ElemOpts o{p.eo.sat, false};
+    for (; k < n; k++) d[k] = cvt<D>(s[k], o);
+}
+
+template <class D>
+static void d2int(const void *src, void *dst, size_t n, const KParams &p) {
+    if (p.eo.rne) { k_cvt<D, double>(src, dst, n, p); return; }
+    const double *s = (const double *)src; D *d = (D *)dst;
+    const double lo = IntLimits<D>::lo, hi = IntLimits<D>::hi;
+    size_t k = 0;
+    if (sizeof(D) == 4) {
+        for (; k + 8 <= n; k += 8) {
+            const __m128i a = clamp_cvt_pd(_mm256_loadu_pd(s + k), lo, hi), b = clamp_cvt_pd(_mm256_loadu_pd(s + k + 4), lo, hi);
+            _mm256_storeu_si256((__m256i *)(d + k), _mm256_set_m128i(b, a));
+        }
+    } else if (sizeof(D) == 2) {
+        for (; k + 16 <= n; k += 16) {
+            const __m256i a = _mm256_set_m128i(clamp_cvt_pd(_mm256_loadu_pd(s + k + 4), lo, hi), clamp_cvt_pd(_mm256_loadu_pd(s + k), lo, hi));
+            const __m256i b = _mm256_set_m128i(clamp_cvt_pd(_mm256_loadu_pd(s + k + 12), lo, hi), clamp_cvt_pd(_mm256_loadu_pd(s + k + 8), lo, hi));
+            _mm256_storeu_si256((__m256i *)(d + k), pack16_i16(a, b));
+        }
+    } else {
+        for (; k + 32 <= n; k += 32) {
+            __m256i q[4];
+            for (int t = 0; t < 4; t++)
+                q[t] = _mm256_set_m128i(clamp_cvt_pd(_mm256_loadu_pd(s + k + 8 * t + 4), lo, hi), clamp_cvt_pd(_mm256_loadu_pd(s + k + 8 * t), lo, hi));
+            _mm256_storeu_si256((__m256i *)(d + k), pack32_i8(q[0], q[1], q[2], q[3]));
+        }
+    }
+    const ElemOpts o{p.eo.sat, false};
+    for (; k < n; k++) d[k] = cvt<D>(s[k], o);
+}
+
 static void d2s_any(const void *a, void *b, size_t n, const KParams &p) { p.eo.sat ? d2s<true>(a, b, n, p) : d2s<false>(a, b, n, p); }
 static void s2h_any(const void *a, void *b, size_t n, const KParams &p) { p.eo.sat ? s2h<true>(a, b, n, p) : s2h<false>(a, b, n, p); }
 static void d2h_any(const void *a, void *b, size_t n, const KParams &p) { p.eo.sat ? d2h<true>(a, b, n, p) : d2h<false>(a, b, n, p); }
@@ -192,6 +277,12 @@ void fill_table_avx2(Table &t) {
     t.cvt[OMC_FP64][OMC_BF16]     = &isa_avx2::d2small<bf16>;
     t.cvt[OMC_FP64][OMC_FP8_E4M3] = &isa_avx2::d2small<e4m3>;
     t.cvt[OMC_FP64][OMC_FP8_E5M2] = &isa_avx2::d2small<e5m2>;
+    t.cvt[OMC_FP32][OMC_INT8]  = &isa_avx2::s2int<int8_t>;
+    t.cvt[OMC_FP32][OMC_INT16] = &isa_avx2::s2int<int16_t>;
+    t.cvt[OMC_FP32][OMC_INT32] = &isa_avx2::s2int<int32_t>;
+    t.cvt[OMC_FP64][OMC_INT8]  = &isa_avx2::d2int<int8_t>;
+    t.cvt[OMC_FP64][OMC_INT16] = &isa_avx2::d2int<int16_t>;
+    t.cvt[OMC_FP64][OMC_INT32] = &isa_avx2::d2int<int32_t>;
 }
 
 } /* namespace cpu */
