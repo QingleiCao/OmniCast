@@ -96,8 +96,9 @@ struct Plan {
     size_t si, so;
 };
 
-/** Validate options and pick the kernel. amax_src/count/ld/m/n describe the
- *  source for OMC_SCALE_DYNAMIC_POW2. */
+/** Validate options and pick the kernel. src/ld/m/n describe the source for
+ *  OMC_SCALE_DYNAMIC_POW2. Host calls read OMC_SCALE_DEVICE's factor from
+ *  host memory (scale_ptr[0]). */
 omc_status_t make_plan(omc_dtype_t st, omc_dtype_t dt, const omc_options_t *o, Plan &pl,
                        const void *src, int64_t ld, int64_t m, int64_t n) {
     if ((unsigned)st >= OMC_NUM_DTYPES || (unsigned)dt >= OMC_NUM_DTYPES) return OMC_ERROR_INVALID_VALUE;
@@ -111,22 +112,22 @@ omc_status_t make_plan(omc_dtype_t st, omc_dtype_t dt, const omc_options_t *o, P
     pl.p.eo.rne = (o->rounding == OMC_ROUND_NEAREST_EVEN);
     pl.p.seed   = o->seed;
     pl.memcpy_ok = false;
-    const bool dst_float = omc_dtype_is_float(dt) != 0;
-    if (o->rounding == OMC_ROUND_TOWARD_ZERO && dst_float) return OMC_ERROR_NOT_SUPPORTED;
-    if (o->rounding == OMC_ROUND_STOCHASTIC) {
-        if (o->scale_mode != OMC_SCALE_NONE) return OMC_ERROR_NOT_SUPPORTED;
-        pl.fn = t.sr[st][dt];
-        return pl.fn ? OMC_SUCCESS : OMC_ERROR_NOT_SUPPORTED;
-    }
+    if ((unsigned)o->rounding > (unsigned)OMC_ROUND_STOCHASTIC) return OMC_ERROR_INVALID_VALUE;
+    if (o->rounding == OMC_ROUND_TOWARD_ZERO && omc_dtype_is_float(dt)) return OMC_ERROR_NOT_SUPPORTED;
+    const bool sr = (o->rounding == OMC_ROUND_STOCHASTIC);
+    if (sr && !t.sr[st][dt]) return OMC_ERROR_NOT_SUPPORTED;
+    bool scaled = true;
     switch (o->scale_mode) {
     case OMC_SCALE_NONE:
-        pl.fn = t.cvt[st][dt];
-        pl.memcpy_ok = (st == dt) && !pl.p.eo.sat;
-        return OMC_SUCCESS;
+        scaled = false;
+        break;
     case OMC_SCALE_HOST:
-        pl.fn = t.scaled[st][dt];
         pl.p.scale = o->scale;
-        return OMC_SUCCESS;
+        break;
+    case OMC_SCALE_DEVICE:
+        if (!o->scale_ptr) return OMC_ERROR_INVALID_VALUE;
+        pl.p.scale = o->scale_ptr[0];
+        break;
     case OMC_SCALE_DYNAMIC_POW2: {
         if (!omc_dtype_is_float(st) || !o->scale_ptr) return OMC_ERROR_INVALID_VALUE;
         double amax = 0.0;
@@ -137,14 +138,21 @@ omc_status_t make_plan(omc_dtype_t st, omc_dtype_t dt, const omc_options_t *o, P
         o->scale_ptr[0] = af;
         o->scale_ptr[1] = s;
         o->scale_ptr[2] = 1.0f / s;
-        pl.fn = t.scaled[st][dt];
         pl.p.scale = s;
-        return OMC_SUCCESS;
+        break;
     }
-    case OMC_SCALE_DEVICE:
     default:
-        return OMC_ERROR_NOT_SUPPORTED;
+        return OMC_ERROR_INVALID_VALUE;
     }
+    if (sr) {
+        pl.fn = scaled ? t.sr_scaled[st][dt] : t.sr[st][dt];
+    } else if (scaled) {
+        pl.fn = t.scaled[st][dt];
+    } else {
+        pl.fn = t.cvt[st][dt];
+        pl.memcpy_ok = (st == dt) && !pl.p.eo.sat;
+    }
+    return pl.fn ? OMC_SUCCESS : OMC_ERROR_NOT_SUPPORTED;
 }
 
 inline int nthreads(const omc_options_t *o, size_t work) {
@@ -269,6 +277,66 @@ void inplace_run(const Plan &pl, char *buf_src, char *buf_dst, size_t n, uint32_
     }
 }
 
+/** Destination geometry of a 2-D call */
+struct Geom {
+    bool tr;
+    int64_t rows, cols, dr, dc;
+};
+inline omc_status_t geometry(const omc_options_t *o, int64_t m, int64_t n, Geom &g) {
+    if (m < 0 || n < 0) return OMC_ERROR_INVALID_VALUE;
+    g.tr = o && (o->flags & OMC_FLAG_TRANSPOSE);
+    g.rows = g.tr ? n : m;
+    g.cols = g.tr ? m : n;
+    g.dr = (o && o->dst_rows > 0) ? o->dst_rows : g.rows;
+    g.dc = (o && o->dst_cols > 0) ? o->dst_cols : g.cols;
+    if (g.dr < g.rows || g.dc < g.cols) return OMC_ERROR_INVALID_VALUE;
+    return OMC_SUCCESS;
+}
+
+/** In place, m-by-n: the source has leading dimension lds (src_type
+ *  elements), the result ldd (dst_type elements). Without transposition or
+ *  padding and with lds == ldd: a single pass (columns front to back when
+ *  elements shrink, back to front when they grow). Otherwise the result goes
+ *  through a temporary of dr x dc elements and is copied back. */
+omc_status_t inplace_2d(omc_dtype_t st, omc_dtype_t dt, void *buf, int64_t lds, int64_t ldd,
+                        int64_t m, int64_t n, const omc_options_t *opts) {
+    Geom g;
+    omc_status_t r = geometry(opts, m, n, g);
+    if (r != OMC_SUCCESS) return r;
+    if (g.dr == 0 || g.dc == 0) return OMC_SUCCESS;
+    if (!buf || lds < std::max<int64_t>(1, m) || ldd < std::max<int64_t>(1, g.dr)) return OMC_ERROR_INVALID_VALUE;
+    const bool padded = (g.dr != g.rows) || (g.dc != g.cols);
+    if (g.tr || padded || lds != ldd) {
+        const size_t so = omc_dtype_size(dt);
+        if (so == 0) return OMC_ERROR_INVALID_VALUE;
+        char *tmp = (char *)malloc((size_t)g.dr * (size_t)g.dc * so);
+        if (!tmp) return OMC_ERROR_ALLOCATION;
+        r = omc_convert_2d(st, buf, lds, dt, tmp, g.dr, m, n, opts);
+        if (r == OMC_SUCCESS)
+            for (int64_t j = 0; j < g.dc; j++)
+                memcpy((char *)buf + (size_t)j * ldd * so, tmp + (size_t)j * g.dr * so, (size_t)g.dr * so);
+        free(tmp);
+        return r;
+    }
+    if (m == 0 || n == 0) return OMC_SUCCESS;
+    const int64_t ld = lds;
+    Plan pl;
+    r = make_plan(st, dt, opts, pl, buf, ld, m, n);
+    if (r != OMC_SUCCESS) return r;
+    if (pl.memcpy_ok) return OMC_SUCCESS;
+    char *b = (char *)buf;
+    const bool sr = opts && opts->rounding == OMC_ROUND_STOCHASTIC;
+    if (ld == m && !sr) {
+        inplace_run(pl, b, b, (size_t)m * n, 0, 0);
+    } else if (pl.so <= pl.si) {
+        for (int64_t j = 0; j < n; j++)
+            inplace_run(pl, b + (size_t)j * ld * pl.si, b + (size_t)j * ld * pl.so, (size_t)m, 0, (uint32_t)j);
+    } else {
+        for (int64_t j = n - 1; j >= 0; j--)
+            inplace_run(pl, b + (size_t)j * ld * pl.si, b + (size_t)j * ld * pl.so, (size_t)m, 0, (uint32_t)j);
+    }
+    return OMC_SUCCESS;
+}
 } /* namespace */
 
 const char *active_isa() { return table().name; }
@@ -299,6 +367,7 @@ omc_status_t omc_convert(omc_dtype_t st, const void *src, omc_dtype_t dt, void *
     if (count == 0) return OMC_SUCCESS;
     if (!src || !dst) return OMC_ERROR_INVALID_VALUE;
     if (opts && (opts->flags & OMC_FLAG_TRANSPOSE)) return OMC_ERROR_INVALID_VALUE;
+    if (src == dst) return omc_convert_inplace(st, dt, dst, count, opts);
     Plan pl;
     omc_status_t r = make_plan(st, dt, opts, pl, src, (int64_t)count, (int64_t)count, 1);
     if (r != OMC_SUCCESS) return r;
@@ -309,23 +378,21 @@ omc_status_t omc_convert(omc_dtype_t st, const void *src, omc_dtype_t dt, void *
 omc_status_t omc_convert_2d(omc_dtype_t st, const void *src, int64_t lds,
                             omc_dtype_t dt, void *dst, int64_t ldd,
                             int64_t m, int64_t n, const omc_options_t *opts) {
-    if (m < 0 || n < 0) return OMC_ERROR_INVALID_VALUE;
-    const bool tr = opts && (opts->flags & OMC_FLAG_TRANSPOSE);
-    const int64_t rows = tr ? n : m, cols = tr ? m : n;      /* of dst */
-    const int64_t dr = (opts && opts->dst_rows > 0) ? opts->dst_rows : rows;
-    const int64_t dc = (opts && opts->dst_cols > 0) ? opts->dst_cols : cols;
-    if (dr < rows || dc < cols) return OMC_ERROR_INVALID_VALUE;
-    if ((dr == 0 || dc == 0)) return OMC_SUCCESS;
+    Geom g;
+    omc_status_t r = geometry(opts, m, n, g);
+    if (r != OMC_SUCCESS) return r;
+    if (g.dr == 0 || g.dc == 0) return OMC_SUCCESS;
     if (!dst || (m > 0 && n > 0 && !src)) return OMC_ERROR_INVALID_VALUE;
-    if (lds < std::max<int64_t>(1, m) || ldd < std::max<int64_t>(1, dr)) return OMC_ERROR_INVALID_VALUE;
+    if (lds < std::max<int64_t>(1, m) || ldd < std::max<int64_t>(1, g.dr)) return OMC_ERROR_INVALID_VALUE;
+    if (src == dst) return inplace_2d(st, dt, dst, lds, ldd, m, n, opts);
     Plan pl;
-    omc_status_t r = make_plan(st, dt, opts, pl, src, lds, m, n);
+    r = make_plan(st, dt, opts, pl, src, lds, m, n);
     if (r != OMC_SUCCESS) return r;
     const char *s = (const char *)src;
     char *d = (char *)dst;
     const bool sr = opts && opts->rounding == OMC_ROUND_STOCHASTIC;
     if (m > 0 && n > 0) {
-        if (!tr) {
+        if (!g.tr) {
             if (!sr && lds == m && ldd == m) {
                 run1d_threads(pl, s, d, (size_t)m * n, nthreads(opts, (size_t)m * n));
             } else {
@@ -347,7 +414,7 @@ omc_status_t omc_convert_2d(omc_dtype_t st, const void *src, int64_t lds,
                 }
         }
     }
-    pad_zero(d, ldd, pl.so, rows, cols, dr, dc);
+    pad_zero(d, ldd, pl.so, g.rows, g.cols, g.dr, g.dc);
     return OMC_SUCCESS;
 }
 
@@ -366,27 +433,7 @@ omc_status_t omc_convert_inplace(omc_dtype_t st, omc_dtype_t dt, void *buf, size
 
 omc_status_t omc_convert_inplace_2d(omc_dtype_t st, omc_dtype_t dt, void *buf, int64_t ld,
                                     int64_t m, int64_t n, const omc_options_t *opts) {
-    if (m < 0 || n < 0) return OMC_ERROR_INVALID_VALUE;
-    if (m == 0 || n == 0) return OMC_SUCCESS;
-    if (!buf || ld < m) return OMC_ERROR_INVALID_VALUE;
-    if (opts && ((opts->flags & OMC_FLAG_TRANSPOSE) || opts->dst_rows > 0 || opts->dst_cols > 0))
-        return OMC_ERROR_INVALID_VALUE;
-    Plan pl;
-    omc_status_t r = make_plan(st, dt, opts, pl, buf, ld, m, n);
-    if (r != OMC_SUCCESS) return r;
-    if (pl.memcpy_ok) return OMC_SUCCESS;
-    char *b = (char *)buf;
-    const bool sr = opts && opts->rounding == OMC_ROUND_STOCHASTIC;
-    if (ld == m && !sr) {
-        inplace_run(pl, b, b, (size_t)m * n, 0, 0);
-    } else if (pl.so <= pl.si) {
-        for (int64_t j = 0; j < n; j++)
-            inplace_run(pl, b + (size_t)j * ld * pl.si, b + (size_t)j * ld * pl.so, (size_t)m, 0, (uint32_t)j);
-    } else {
-        for (int64_t j = n - 1; j >= 0; j--)
-            inplace_run(pl, b + (size_t)j * ld * pl.si, b + (size_t)j * ld * pl.so, (size_t)m, 0, (uint32_t)j);
-    }
-    return OMC_SUCCESS;
+    return inplace_2d(st, dt, buf, ld, ld, m, n, opts);
 }
 
 omc_status_t omc_amax_2d(omc_dtype_t type, const void *src, int64_t ld, int64_t m, int64_t n, double *amax) {

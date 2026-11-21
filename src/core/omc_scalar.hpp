@@ -586,6 +586,15 @@ OMC_HD D cvt_scaled(S s, float scale, const ElemOpts &o) {
     return EncFrom<D, X>::go(x, o);
 }
 
+/** Stochastic rounding of s * scale: the product as in cvt_scaled, then the
+ *  stochastic rounding of that value (pairs with sr_ok<D, S>). */
+template <class D, class S>
+OMC_HD D sr_scaled(S s, float scale, uint32_t i, uint32_t j, uint64_t seed, const ElemOpts &o) {
+    using X = typename Src<S>::T;
+    const X x = Src<S>::get(s) * (X)scale;
+    return SR<D, X>::go(x, i, j, seed, o);
+}
+
 /** |s| as float for amax (NaN -> 0) */
 template <class S>
 OMC_HD float abs_f32(S s) {

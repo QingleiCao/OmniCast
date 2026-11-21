@@ -31,6 +31,10 @@ typedef hipError_t  gpuError_t;
 #define gpuDeviceSynchronize     hipDeviceSynchronize
 #define gpuDeviceGetAttribute    hipDeviceGetAttribute
 #define gpuDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
+#define gpuDevAttrMemoryPoolsSupported hipDeviceAttributeMemoryPoolsSupported
+#define gpuMallocAsync           hipMallocAsync
+#define gpuFreeAsync             hipFreeAsync
+#define gpuStreamSynchronize     hipStreamSynchronize
 #else
 #include <cuda_runtime.h>
 typedef cudaStream_t gpuStream_t;
@@ -51,6 +55,10 @@ typedef cudaError_t  gpuError_t;
 #define gpuDeviceSynchronize     cudaDeviceSynchronize
 #define gpuDeviceGetAttribute    cudaDeviceGetAttribute
 #define gpuDevAttrMultiProcessorCount cudaDevAttrMultiProcessorCount
+#define gpuDevAttrMemoryPoolsSupported cudaDevAttrMemoryPoolsSupported
+#define gpuMallocAsync           cudaMallocAsync
+#define gpuFreeAsync             cudaFreeAsync
+#define gpuStreamSynchronize     cudaStreamSynchronize
 #endif
 
 namespace omc {
@@ -59,11 +67,11 @@ namespace gpu {
 enum Op {
     OP_CVT = 0,      /* 1-D / 2-D, optional padding */
     OP_TRANSPOSE,    /* dst = cvt(src)^T, optional padding */
-    OP_INPLACE,      /* contiguous, ordered single pass */
+    OP_INPLACE,      /* ordered single pass (1-D, or 2-D with the same ld before and after) */
     OP_AMAX          /* amax (and the dynamic power-of-two scale) */
 };
 
-enum Mode { MODE_PLAIN = 0, MODE_SCALED = 1, MODE_SR = 2 };
+enum Mode { MODE_PLAIN = 0, MODE_SCALED = 1, MODE_SR = 2, MODE_SR_SCALED = 3 };
 
 struct LaunchArgs {
     Op          op;
@@ -71,13 +79,13 @@ struct LaunchArgs {
     omc_dtype_t st, dt;
     const void *src;
     void       *dst;
-    int64_t     lds, ldd;
+    int64_t     lds, ldd;    /* OP_INPLACE: lds is the leading dimension before and after */
     int64_t     m, n;        /* source matrix */
     int64_t     dr, dc;      /* destination region written (>= converted part) */
     bool        sat, rne;
     uint64_t    seed;
-    float       scale;       /* MODE_SCALED, used when scale_ptr is NULL */
-    const float *scale_ptr;  /* MODE_SCALED: device pointer, reads scale_ptr[scale_index] */
+    float       scale;       /* MODE_SCALED / MODE_SR_SCALED, used when scale_ptr is NULL */
+    const float *scale_ptr;  /* scaled modes: device pointer, reads scale_ptr[scale_index] */
     int         scale_index;
     /* OP_AMAX */
     float      *amax_out;    /* device: {amax} or {amax, s, 1/s} */

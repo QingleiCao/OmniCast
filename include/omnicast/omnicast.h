@@ -23,6 +23,12 @@
  * Matrices are column-major: element (i, j) of an m-by-n matrix with leading
  * dimension ld is at index i + j * ld, ld counted in elements of that matrix.
  *
+ * Every conversion, with every option, is available out of place and in
+ * place, on the host and on the GPU. In place means the result overwrites the
+ * source: call the omc_*_inplace* functions, or pass dst == src to omc_convert
+ * / omc_convert_2d (and the GPU versions). Source and destination must be
+ * either identical or disjoint.
+ *
  * All functions are thread-safe. GPU functions run on the current device and
  * the given stream (NULL: the default stream), and return once the work is
  * enqueued.
@@ -72,7 +78,8 @@ typedef enum omc_round {
     OMC_ROUND_DEFAULT = 0,     /**< nearest even for float targets, truncation for integer targets */
     OMC_ROUND_NEAREST_EVEN,    /**< nearest even for every target */
     OMC_ROUND_TOWARD_ZERO,     /**< truncation (integer targets only) */
-    OMC_ROUND_STOCHASTIC       /**< stochastic rounding (float targets narrower than the source) */
+    OMC_ROUND_STOCHASTIC       /**< stochastic rounding (float targets narrower than the source);
+                                    combines with every scale mode (rounds src * scale) */
 } omc_round_t;
 
 /** Option flags (omc_options_t::flags) */
@@ -82,8 +89,11 @@ typedef enum omc_round {
 typedef enum omc_scale_mode {
     OMC_SCALE_NONE = 0,        /**< dst = cvt(src) */
     OMC_SCALE_HOST,            /**< dst = cvt(src * scale) */
-    OMC_SCALE_DEVICE,          /**< GPU: dst = cvt(src * scale_ptr[0]), scale_ptr a device pointer */
-    OMC_SCALE_DYNAMIC_POW2     /**< s = largest power of two with s * amax(src) <= scale_max;
+    OMC_SCALE_DEVICE,          /**< dst = cvt(src * scale_ptr[0]), read when the conversion runs
+                                    (a device pointer for GPU calls, a host pointer for CPU calls) */
+    OMC_SCALE_DYNAMIC_POW2     /**< float sources, any target: s = largest power of two with
+                                    s * amax(src) <= scale_max (default: the largest finite value of
+                                    a float target, the largest value of an integer target);
                                     dst = cvt(src * s); writes scale_ptr[0..2] = {amax, s, 1/s}
                                     (device memory for GPU calls, host memory for CPU calls) */
 } omc_scale_mode_t;
@@ -132,23 +142,31 @@ const char *omc_gpu_backend(void);
 /* Host (CPU) conversions                                                     */
 /* ------------------------------------------------------------------------ */
 
-/** dst[k] = cvt(src[k]) for k < count. src and dst must not overlap. */
+/** dst[k] = cvt(src[k]) for k < count. dst == src converts in place. */
 omc_status_t omc_convert(omc_dtype_t src_type, const void *src,
                          omc_dtype_t dst_type, void *dst,
                          size_t count, const omc_options_t *opts);
 
-/** m-by-n column-major matrices. With OMC_FLAG_TRANSPOSE dst is n-by-m. */
+/** m-by-n column-major matrices. With OMC_FLAG_TRANSPOSE dst is n-by-m.
+ *  dst == src converts in place (src read with lds, the result written with
+ *  ldd; see omc_convert_inplace_2d). */
 omc_status_t omc_convert_2d(omc_dtype_t src_type, const void *src, int64_t lds,
                             omc_dtype_t dst_type, void *dst, int64_t ldd,
                             int64_t m, int64_t n, const omc_options_t *opts);
 
 /** In place: buf holds count src_type elements on entry, count dst_type
- *  elements on exit (the buffer must be large enough for both). */
+ *  elements on exit (the buffer must be large enough for both). One pass
+ *  through an L1-sized buffer, no allocation. */
 omc_status_t omc_convert_inplace(omc_dtype_t src_type, omc_dtype_t dst_type,
                                  void *buf, size_t count, const omc_options_t *opts);
 
-/** In place, m-by-n matrix with the same leading dimension ld (in elements)
- *  before and after. Transposition and padding are not available in place. */
+/** In place, m-by-n matrix with the same leading dimension ld (in elements of
+ *  each type) before and after; buf must hold the larger of the two
+ *  footprints. All options are available. When the element size changes, the
+ *  rows m..ld-1 of the result are left undefined (they may hold source bytes).
+ *  Without transposition or padding this is a single pass with no allocation;
+ *  with OMC_FLAG_TRANSPOSE or dst_rows / dst_cols the result (dr-by-dc, ld >=
+ *  dr) is built in a temporary and copied back. */
 omc_status_t omc_convert_inplace_2d(omc_dtype_t src_type, omc_dtype_t dst_type,
                                     void *buf, int64_t ld, int64_t m, int64_t n,
                                     const omc_options_t *opts);
@@ -173,15 +191,18 @@ omc_status_t omc_gpu_convert_2d(omc_dtype_t src_type, const void *src, int64_t l
                                 int64_t m, int64_t n, const omc_options_t *opts,
                                 omc_stream_t stream);
 
-/** Single-pass in-place conversion of a contiguous buffer (one kernel, no
- *  temporary copy of the data). Uses a small internal per-stream workspace
- *  unless opts->workspace is given (see omc_gpu_inplace_workspace_size). */
+/** Single-pass in-place conversion of a buffer (one kernel, no temporary copy
+ *  of the data). Uses a small internal per-stream workspace unless
+ *  opts->workspace is given (see omc_gpu_workspace_size). */
 omc_status_t omc_gpu_convert_inplace(omc_dtype_t src_type, omc_dtype_t dst_type,
                                      void *buf, size_t count,
                                      const omc_options_t *opts, omc_stream_t stream);
 
-/** In place for an m-by-n matrix with leading dimension ld. Only contiguous
- *  matrices (ld == m or n == 1) are supported when the element size changes. */
+/** In place for an m-by-n matrix with leading dimension ld, as
+ *  omc_convert_inplace_2d: one ordered single-pass kernel for any ld >= m
+ *  (gaps neither read nor written). With OMC_FLAG_TRANSPOSE or dst_rows /
+ *  dst_cols the result goes through a stream-ordered temporary
+ *  (cudaMallocAsync / hipMallocAsync) and a copy back. */
 omc_status_t omc_gpu_convert_inplace_2d(omc_dtype_t src_type, omc_dtype_t dst_type,
                                         void *buf, int64_t ld, int64_t m, int64_t n,
                                         const omc_options_t *opts, omc_stream_t stream);
@@ -191,7 +212,8 @@ omc_status_t omc_gpu_amax_2d(omc_dtype_t type, const void *src, int64_t ld,
                              int64_t m, int64_t n, float *d_amax, omc_stream_t stream);
 
 /** Bytes of zeroed workspace that an in-place or dynamically scaled call on
- *  `count` elements needs when the caller provides it. The workspace must be
+ *  `count` elements needs when the caller provides it (for a matrix, count =
+ *  (n - 1) * ld + m). The workspace must be
  *  zero-filled once (e.g. cudaMemset) and must not be used by two calls that
  *  can run at the same time; OmniCast leaves it zeroed after each call. */
 size_t omc_gpu_workspace_size(size_t count);

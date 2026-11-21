@@ -13,8 +13,11 @@ const Info kInfo[OMC_NUM_DTYPES] = {
     {"bf16", 2, 1, 3.3895313892515355e38f},
     {"e4m3", 1, 1, 448.0f},
     {"e5m2", 1, 1, 57344.0f},
-    {"int8", 1, 0, 0.0f},  {"int16", 2, 0, 0.0f},  {"int32", 4, 0, 0.0f},  {"int64", 8, 0, 0.0f},
-    {"uint8", 1, 0, 0.0f}, {"uint16", 2, 0, 0.0f}, {"uint32", 4, 0, 0.0f}, {"uint64", 8, 0, 0.0f},
+    /* integers: the largest float not above the largest value (dynamic scaling target) */
+    {"int8", 1, 0, 127.0f},  {"int16", 2, 0, 32767.0f},  {"int32", 4, 0, 2147483520.0f},
+    {"int64", 8, 0, 9223371487098961920.0f},
+    {"uint8", 1, 0, 255.0f}, {"uint16", 2, 0, 65535.0f}, {"uint32", 4, 0, 4294967040.0f},
+    {"uint64", 8, 0, 18446742974197923840.0f},
 };
 struct Alias { const char *name; omc_dtype_t t; };
 const Alias kAlias[] = {
@@ -32,6 +35,11 @@ const Alias kAlias[] = {
 
 namespace omc {
 float max_finite_of(omc_dtype_t t) { return ((unsigned)t < OMC_NUM_DTYPES) ? kInfo[t].maxf : 0.0f; }
+bool sr_supported(omc_dtype_t s, omc_dtype_t d) {
+    static const int rank[OMC_NUM_DTYPES] = {4, 3, 2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    if ((unsigned)s >= OMC_NUM_DTYPES || (unsigned)d >= OMC_NUM_DTYPES) return false;
+    return rank[d] > 0 && rank[d] < rank[s];
+}
 }
 
 extern "C" {

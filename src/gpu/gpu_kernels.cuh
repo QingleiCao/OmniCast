@@ -9,7 +9,8 @@
  *  k_cvtT     transposed conversion through a shared-memory tile: reads and
  *             writes are both coalesced (the HiCMA-X FP8 kernels wrote one
  *             byte per thread at a stride of ld).
- *  k_inplace  single-pass in-place conversion of a contiguous buffer. Blocks
+ *  k_inplace  single-pass in-place conversion of a buffer (1-D, or a matrix
+ *             with the same leading dimension before and after). Blocks
  *             take chunks in address order (front to back when elements
  *             shrink, back to front when they grow), publish a flag once their
  *             input is in registers, and write only after the chunks their
@@ -123,7 +124,8 @@ struct ElemOp {
     __device__ __forceinline__ D operator()(S s, uint32_t i, uint32_t j) const {
         if constexpr (MODE == MODE_PLAIN)       return cvt<D>(s, o);
         else if constexpr (MODE == MODE_SCALED) return cvt_scaled<D>(s, scale, o);
-        else                                    return SR<D, S>::go(s, i, j, seed, o);
+        else if constexpr (MODE == MODE_SR)     return SR<D, S>::go(s, i, j, seed, o);
+        else                                    return sr_scaled<D, S>(s, scale, i, j, seed, o);
     }
 };
 
@@ -138,7 +140,7 @@ __global__ void __launch_bounds__(kThreads)
 k_cvt(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int64_t dr, int64_t dc,
       ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index, int vec) {
     constexpr int VW = Vw<S, D>::value;
-    if (MODE == MODE_SCALED && scale_ptr) op.scale = scale_ptr[scale_index];
+    if ((MODE == MODE_SCALED || MODE == MODE_SR_SCALED) && scale_ptr) op.scale = scale_ptr[scale_index];
     const int64_t tile0 = (int64_t)blockIdx.x * blockDim.x * VW * kRounds;
     if (tile0 >= dr) return;
     for (int64_t j = (int64_t)blockIdx.y * blockDim.y + threadIdx.y; j < dc; j += (int64_t)gridDim.y * blockDim.y) {
@@ -190,7 +192,7 @@ k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int
        ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index, int vec) {
     constexpr int W = TP<D>::W, P = TP<D>::pitch;
     __shared__ __align__(16) unsigned char tile_raw[64 * P];
-    if (MODE == MODE_SCALED && scale_ptr) op.scale = scale_ptr[scale_index];
+    if ((MODE == MODE_SCALED || MODE == MODE_SR_SCALED) && scale_ptr) op.scale = scale_ptr[scale_index];
     const int t = threadIdx.x;
     const int64_t i0 = (int64_t)blockIdx.x * 64;            /* source rows = dst columns */
     for (int64_t j0 = (int64_t)blockIdx.y * 64; j0 < dr; j0 += (int64_t)gridDim.y * 64) {   /* source columns = dst rows */
@@ -229,41 +231,59 @@ k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int
     }
 }
 
+/* Element e of the linear range [0, count) is (i, j) = (e % ld, e / ld); with
+ * ld > m (strided) the elements with i >= m are gaps, neither read nor
+ * written. Chunks are ranges of the linear index, so the ordering argument is
+ * the same as for a contiguous buffer. */
 template <class S, class D, int MODE>
 __global__ void __launch_bounds__(kThreads)
-k_inplace(char *buf, int64_t count, int64_t m, ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index,
-          uint32_t *ws, uint32_t nchunks) {
+k_inplace(char *buf, int64_t count, int64_t m, int64_t ld, int strided, int vec, ElemOp<S, D, MODE> op,
+          const float *scale_ptr, int scale_index, uint32_t *ws, uint32_t nchunks) {
     constexpr int VW = Vw<S, D>::value;
     constexpr int64_t C = (int64_t)kThreads * VW * kRounds;
+    constexpr int64_t STEP = (int64_t)kThreads * VW;     /* between the rounds of a thread */
     constexpr bool shrink = sizeof(D) < sizeof(S);
+    constexpr bool POS = (MODE == MODE_SR || MODE == MODE_SR_SCALED);
     __shared__ uint32_t s_ticket;
     __shared__ int s_last;
-    if (MODE == MODE_SCALED && scale_ptr) op.scale = scale_ptr[scale_index];
+    if ((MODE == MODE_SCALED || MODE == MODE_SR_SCALED) && scale_ptr) op.scale = scale_ptr[scale_index];
     if (threadIdx.x == 0) s_ticket = atomicAdd(&ws[0], 1u);
     __syncthreads();
     const uint32_t chunk = shrink ? s_ticket : (nchunks - 1u - s_ticket);
     const S *src = reinterpret_cast<const S *>(buf);
     D *dst = reinterpret_cast<D *>(buf);
     const int64_t c0 = (int64_t)chunk * C;
+    const bool need_pos = POS || strided;
+    /* (i, j) of the first element of round 0; later rounds step by STEP */
+    int64_t pi = 0, pj = 0;
+    if (need_pos) { const int64_t e = c0 + (int64_t)threadIdx.x * VW; pj = e / ld; pi = e - pj * ld; }
     D w[kRounds][VW];
+    bool vfull[kRounds];
+    int64_t ri[kRounds];                   /* row of the round's first element (strided stores) */
 #pragma unroll
     for (int r = 0; r < kRounds; r++) {
         const int64_t e0 = c0 + ((int64_t)r * kThreads + threadIdx.x) * VW;
-        uint32_t ci = 0, cj = 0;      /* position for stochastic rounding (column-major, m rows) */
-        if (MODE == MODE_SR) { const int64_t jj = e0 / m; cj = (uint32_t)jj; ci = (uint32_t)(e0 - jj * m); }
-        if (e0 + VW <= count) {
+        if (need_pos && r > 0) {
+            pi += STEP;
+            if (ld >= STEP) { if (pi >= ld) { pi -= ld; pj++; } }
+            else            { pj += pi / ld; pi %= ld; }
+        }
+        uint32_t ci = (uint32_t)pi, cj = (uint32_t)pj;
+        ri[r] = pi;
+        vfull[r] = vec && (e0 + VW <= count) && (!strided || pi + VW <= m);
+        if (vfull[r]) {
             S v[VW];
             vload(src + e0, v);
 #pragma unroll
             for (int k = 0; k < VW; k++) {
                 w[r][k] = op(v[k], ci, cj);
-                if (MODE == MODE_SR) { if (++ci == (uint32_t)m) { ci = 0; cj++; } }
+                if (POS) { if (++ci == (uint32_t)ld) { ci = 0; cj++; } }    /* contiguous: may cross a column */
             }
         } else {
 #pragma unroll
             for (int k = 0; k < VW; k++) {
-                if (e0 + k < count) w[r][k] = op(src[e0 + k], ci, cj);
-                if (MODE == MODE_SR) { if (++ci == (uint32_t)m) { ci = 0; cj++; } }
+                if (e0 + k < count && (!strided || ci < (uint32_t)m)) w[r][k] = op(src[e0 + k], ci, cj);
+                if (need_pos) { if (++ci == (uint32_t)ld) { ci = 0; cj++; } }
             }
         }
     }
@@ -288,11 +308,15 @@ k_inplace(char *buf, int64_t count, int64_t m, ElemOp<S, D, MODE> op, const floa
 #pragma unroll
     for (int r = 0; r < kRounds; r++) {
         const int64_t e0 = c0 + ((int64_t)r * kThreads + threadIdx.x) * VW;
-        if (e0 + VW <= count) {
+        if (vfull[r]) {
             vstore(dst + e0, w[r]);
         } else {
+            uint32_t ci = (uint32_t)ri[r];
 #pragma unroll
-            for (int k = 0; k < VW; k++) if (e0 + k < count) dst[e0 + k] = w[r][k];
+            for (int k = 0; k < VW; k++) {
+                if (e0 + k < count && (!strided || ci < (uint32_t)m)) dst[e0 + k] = w[r][k];
+                if (strided) { if (++ci == (uint32_t)ld) ci = 0; }
+            }
         }
     }
     __syncthreads();
@@ -416,14 +440,16 @@ omc_status_t launch_mode(const LaunchArgs &a) {
         if constexpr (sizeof(S) == sizeof(D)) {
             return OMC_ERROR_NOT_SUPPORTED;    /* the API layer uses k_cvt in place */
         } else {
-            const int64_t count = a.m * a.n;
+            const int64_t ld = a.lds;
+            const int64_t count = (a.n - 1) * ld + a.m;          /* linear range covering the matrix */
+            const int strided = (ld != a.m) && (a.n > 1);
             const int64_t C = (int64_t)kThreads * VW * kRounds;
             const int64_t nchunks = (count + C - 1) / C;
-            if (!aligned16(a.dst)) return OMC_ERROR_INVALID_VALUE;
+            const int vec = aligned16(a.dst);             /* else element by element */
             if (nchunks > 0x7fffffff || (size_t)(nchunks + kFlagsOffset) * 4 > a.ws_bytes) return OMC_ERROR_INVALID_VALUE;
             k_inplace<S, D, MODE><<<(unsigned)nchunks, kThreads, 0, a.stream>>>(
-                static_cast<char *>(a.dst), count, a.m, op, a.scale_ptr, a.scale_index,
-                static_cast<uint32_t *>(a.ws), (uint32_t)nchunks);
+                static_cast<char *>(a.dst), count, a.m, a.n > 1 ? ld : a.m, strided, vec, op,
+                a.scale_ptr, a.scale_index, static_cast<uint32_t *>(a.ws), (uint32_t)nchunks);
             return check_launch();
         }
     }
@@ -438,10 +464,12 @@ omc_status_t launch_pair(const LaunchArgs &a) {
     case MODE_PLAIN:
         return launch_mode<S, D, MODE_PLAIN>(a);
     case MODE_SCALED:
-        if constexpr (Traits<S>::is_float && Traits<D>::is_float) return launch_mode<S, D, MODE_SCALED>(a);
-        else return OMC_ERROR_NOT_SUPPORTED;
+        return launch_mode<S, D, MODE_SCALED>(a);
     case MODE_SR:
         if constexpr (sr_ok<D, S>::value) return launch_mode<S, D, MODE_SR>(a);
+        else return OMC_ERROR_NOT_SUPPORTED;
+    case MODE_SR_SCALED:
+        if constexpr (sr_ok<D, S>::value) return launch_mode<S, D, MODE_SR_SCALED>(a);
         else return OMC_ERROR_NOT_SUPPORTED;
     }
     return OMC_ERROR_NOT_SUPPORTED;

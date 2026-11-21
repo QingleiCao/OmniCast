@@ -41,6 +41,7 @@ struct Table {
     KFn    cvt[NT][NT];      /* [src][dst] */
     KFn    scaled[NT][NT];
     KFn    sr[NT][NT];       /* NULL when the pair has no stochastic rounding */
+    KFn    sr_scaled[NT][NT];/* stochastic rounding of src * scale (same pairs as sr) */
     AmaxFn amax[NT];
 };
 
@@ -115,6 +116,19 @@ static void k_sr(const void *src, void *dst, size_t n, const KParams &p) {
     else          loop_sr<D, S, false>((const S *)src, (D *)dst, n, p.i0, p.j, p.seed);
 }
 
+template <class D, class S, bool SAT>
+static inline void loop_sr_scaled(const S *__restrict s, D *__restrict d, size_t n, float scale, uint32_t i0, uint32_t j,
+                                  uint64_t seed) {
+    const ElemOpts o{SAT, false};
+    for (size_t k = 0; k < n; k++) d[k] = sr_scaled<D, S>(s[k], scale, i0 + (uint32_t)k, j, seed, o);
+}
+
+template <class D, class S>
+static void k_sr_scaled(const void *src, void *dst, size_t n, const KParams &p) {
+    if (p.eo.sat) loop_sr_scaled<D, S, true>((const S *)src, (D *)dst, n, p.scale, p.i0, p.j, p.seed);
+    else          loop_sr_scaled<D, S, false>((const S *)src, (D *)dst, n, p.scale, p.i0, p.j, p.seed);
+}
+
 template <class S>
 static double k_amax(const void *src, size_t n) {
     const S *__restrict s = (const S *)src;
@@ -144,8 +158,8 @@ template <class S, class D>
 static void fill_pair(Table &t, int si, int di) {
     t.cvt[si][di]    = &k_cvt<D, S>;
     t.scaled[si][di] = &k_scaled<D, S>;
-    if constexpr (sr_ok<D, S>::value) t.sr[si][di] = &k_sr<D, S>;
-    else                              t.sr[si][di] = nullptr;
+    if constexpr (sr_ok<D, S>::value) { t.sr[si][di] = &k_sr<D, S>; t.sr_scaled[si][di] = &k_sr_scaled<D, S>; }
+    else                              { t.sr[si][di] = nullptr;      t.sr_scaled[si][di] = nullptr; }
 }
 
 template <class S>

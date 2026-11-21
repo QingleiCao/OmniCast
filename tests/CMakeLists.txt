@@ -5,6 +5,13 @@ add_test(NAME omnicast_cpu COMMAND omnicast_test_cpu)
 # a parent project can add its own labels (HiCMA-X: hicma)
 set_tests_properties(omnicast_cpu PROPERTIES LABELS "omnicast;${OMNICAST_TEST_LABELS}")
 
+# every pair x option set x layout, out of place / in place / dst == src
+add_executable(omnicast_test_modes test_modes.cpp)
+target_link_libraries(omnicast_test_modes PRIVATE omnicast)
+set_target_properties(omnicast_test_modes PROPERTIES CXX_STANDARD 17)
+add_test(NAME omnicast_modes COMMAND omnicast_test_modes)
+set_tests_properties(omnicast_modes PROPERTIES LABELS "omnicast;${OMNICAST_TEST_LABELS}")
+
 if(OMNICAST_GPU STREQUAL "CUDA" OR OMNICAST_GPU STREQUAL "HIP")
     add_executable(omnicast_test_gpu test_gpu.cu)
     target_link_libraries(omnicast_test_gpu PRIVATE omnicast)
@@ -16,6 +23,17 @@ if(OMNICAST_GPU STREQUAL "CUDA" OR OMNICAST_GPU STREQUAL "HIP")
     endif()
     add_test(NAME omnicast_gpu COMMAND omnicast_test_gpu)
     set_tests_properties(omnicast_gpu PROPERTIES LABELS "omnicast;gpu;${OMNICAST_TEST_LABELS}")
+
+    add_executable(omnicast_test_modes_gpu test_modes_gpu.cu)
+    target_link_libraries(omnicast_test_modes_gpu PRIVATE omnicast)
+    if(OMNICAST_GPU STREQUAL "HIP")
+        set_source_files_properties(test_modes_gpu.cu PROPERTIES LANGUAGE HIP)
+        set_target_properties(omnicast_test_modes_gpu PROPERTIES HIP_STANDARD 17)
+    else()
+        set_target_properties(omnicast_test_modes_gpu PROPERTIES CUDA_STANDARD 17)
+    endif()
+    add_test(NAME omnicast_modes_gpu COMMAND omnicast_test_modes_gpu)
+    set_tests_properties(omnicast_modes_gpu PROPERTIES LABELS "omnicast;gpu;${OMNICAST_TEST_LABELS}")
 endif()
 
 # Exhaustive check of the scalar core against the CUDA headers' host
