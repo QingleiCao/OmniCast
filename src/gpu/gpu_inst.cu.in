@@ -1,0 +1,7 @@
+/* Generated from src/gpu/gpu_inst.cu.in: the kernels whose source type is @OMC_INST_TYPE@. */
+#include "@OMC_INST_DIR@/gpu_kernels.cuh"
+namespace omc {
+namespace gpu {
+omc_status_t launch_src_@OMC_INST_NAME@(const LaunchArgs &a) { return launch_for_src<@OMC_INST_TYPE@>(a); }
+}
+}

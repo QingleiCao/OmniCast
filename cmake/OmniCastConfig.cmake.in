@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+set(OMNICAST_GPU_BACKEND "@_omc_gpu@")
+if(NOT @OMNICAST_BUILD_SHARED@)
+    # a static library carries its private dependencies to the link line
+    if(OMNICAST_GPU_BACKEND STREQUAL "CUDA")
+        find_dependency(CUDAToolkit)
+    endif()
+    if(@OpenMP_CXX_FOUND@)
+        find_dependency(OpenMP COMPONENTS CXX)
+    endif()
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/OmniCastTargets.cmake")
+check_required_components(OmniCast)

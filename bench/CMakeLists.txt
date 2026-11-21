@@ -1,0 +1,16 @@
+enable_language(C)
+add_library(omnicast_legacy_cpu STATIC legacy_hicma_cpu.c)
+# compiled like HiCMA-X: -O3, no target-specific flags
+set_source_files_properties(legacy_hicma_cpu.c PROPERTIES COMPILE_OPTIONS "-O3")
+target_link_libraries(omnicast_legacy_cpu PRIVATE m)
+add_executable(omnicast_bench_cpu bench_cpu.cpp)
+target_link_libraries(omnicast_bench_cpu PRIVATE omnicast omnicast_legacy_cpu)
+set_target_properties(omnicast_bench_cpu PROPERTIES CXX_STANDARD 17)
+
+if(OMNICAST_GPU STREQUAL "CUDA" OR OMNICAST_GPU STREQUAL "HIP")
+    add_executable(omnicast_bench_gpu bench_gpu.cu)
+    target_link_libraries(omnicast_bench_gpu PRIVATE omnicast)
+    if(OMNICAST_GPU STREQUAL "HIP")
+        set_source_files_properties(bench_gpu.cu PROPERTIES LANGUAGE HIP)
+    endif()
+endif()

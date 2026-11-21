@@ -1,0 +1,120 @@
+/**
+ * @file gpu_rt.hpp
+ * @brief CUDA/HIP portability layer and the launch interface between the
+ * public GPU API (gpu_api.cu) and the per-source-type kernel units
+ * (gpu_inst_*.cu).
+ */
+#ifndef OMC_GPU_RT_HPP
+#define OMC_GPU_RT_HPP
+
+#include <stdint.h>
+#include <stddef.h>
+#include "omnicast/omnicast.h"
+
+#if defined(OMC_BACKEND_HIP)
+#include <hip/hip_runtime.h>
+typedef hipStream_t gpuStream_t;
+typedef hipError_t  gpuError_t;
+#define gpuSuccess               hipSuccess
+#define gpuGetLastError          hipGetLastError
+#define gpuPeekAtLastError       hipPeekAtLastError
+#define gpuMemcpyAsync           hipMemcpyAsync
+#define gpuMemcpy2DAsync         hipMemcpy2DAsync
+#define gpuMemsetAsync           hipMemsetAsync
+#define gpuMemcpyDeviceToDevice  hipMemcpyDeviceToDevice
+#define gpuMemcpyHostToDevice    hipMemcpyHostToDevice
+#define gpuMalloc                hipMalloc
+#define gpuFree                  hipFree
+#define gpuMemset                hipMemset
+#define gpuGetDevice             hipGetDevice
+#define gpuSetDevice             hipSetDevice
+#define gpuDeviceSynchronize     hipDeviceSynchronize
+#define gpuDeviceGetAttribute    hipDeviceGetAttribute
+#define gpuDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
+#else
+#include <cuda_runtime.h>
+typedef cudaStream_t gpuStream_t;
+typedef cudaError_t  gpuError_t;
+#define gpuSuccess               cudaSuccess
+#define gpuGetLastError          cudaGetLastError
+#define gpuPeekAtLastError       cudaPeekAtLastError
+#define gpuMemcpyAsync           cudaMemcpyAsync
+#define gpuMemcpy2DAsync         cudaMemcpy2DAsync
+#define gpuMemsetAsync           cudaMemsetAsync
+#define gpuMemcpyDeviceToDevice  cudaMemcpyDeviceToDevice
+#define gpuMemcpyHostToDevice    cudaMemcpyHostToDevice
+#define gpuMalloc                cudaMalloc
+#define gpuFree                  cudaFree
+#define gpuMemset                cudaMemset
+#define gpuGetDevice             cudaGetDevice
+#define gpuSetDevice             cudaSetDevice
+#define gpuDeviceSynchronize     cudaDeviceSynchronize
+#define gpuDeviceGetAttribute    cudaDeviceGetAttribute
+#define gpuDevAttrMultiProcessorCount cudaDevAttrMultiProcessorCount
+#endif
+
+namespace omc {
+namespace gpu {
+
+enum Op {
+    OP_CVT = 0,      /* 1-D / 2-D, optional padding */
+    OP_TRANSPOSE,    /* dst = cvt(src)^T, optional padding */
+    OP_INPLACE,      /* contiguous, ordered single pass */
+    OP_AMAX          /* amax (and the dynamic power-of-two scale) */
+};
+
+enum Mode { MODE_PLAIN = 0, MODE_SCALED = 1, MODE_SR = 2 };
+
+struct LaunchArgs {
+    Op          op;
+    Mode        mode;
+    omc_dtype_t st, dt;
+    const void *src;
+    void       *dst;
+    int64_t     lds, ldd;
+    int64_t     m, n;        /* source matrix */
+    int64_t     dr, dc;      /* destination region written (>= converted part) */
+    bool        sat, rne;
+    uint64_t    seed;
+    float       scale;       /* MODE_SCALED, used when scale_ptr is NULL */
+    const float *scale_ptr;  /* MODE_SCALED: device pointer, reads scale_ptr[scale_index] */
+    int         scale_index;
+    /* OP_AMAX */
+    float      *amax_out;    /* device: {amax} or {amax, s, 1/s} */
+    int         amax_scale;  /* write the scale triple */
+    float       scale_max;
+    /* workspace (zeroed, left zeroed) */
+    void       *ws;
+    size_t      ws_bytes;
+    gpuStream_t stream;
+    int         num_sms;
+};
+
+/* Workspace layout (32-bit words): [0] in-place ticket, [1] in-place done
+ * count, [2] amax done count, [3] unused, [4, 4 + kMaxAmaxBlocks) amax
+ * partials (need not be zero), then one in-place flag per chunk. Counters and
+ * flags are zero between calls. */
+constexpr int    kThreads       = 256;
+constexpr int    kMaxAmaxBlocks = 1024;
+constexpr int    kFlagsOffset   = 4 + kMaxAmaxBlocks;
+inline size_t workspace_bytes_for(size_t count) {
+    const size_t chunk = (size_t)kThreads * 2;           /* smallest chunk (ITEMS >= 2) */
+    const size_t nchunks = (count + chunk - 1) / chunk;
+    const size_t r = (kFlagsOffset + nchunks) * sizeof(uint32_t);
+    return (r + 255) & ~(size_t)255;
+}
+
+using LaunchFn = omc_status_t (*)(const LaunchArgs &);
+
+/* one per source type, defined in gpu_inst_<type>.cu */
+#define OMC_DECLARE_LAUNCH(name) omc_status_t launch_src_##name(const LaunchArgs &a);
+OMC_DECLARE_LAUNCH(fp64) OMC_DECLARE_LAUNCH(fp32) OMC_DECLARE_LAUNCH(fp16) OMC_DECLARE_LAUNCH(bf16)
+OMC_DECLARE_LAUNCH(e4m3) OMC_DECLARE_LAUNCH(e5m2)
+OMC_DECLARE_LAUNCH(int8) OMC_DECLARE_LAUNCH(int16) OMC_DECLARE_LAUNCH(int32) OMC_DECLARE_LAUNCH(int64)
+OMC_DECLARE_LAUNCH(uint8) OMC_DECLARE_LAUNCH(uint16) OMC_DECLARE_LAUNCH(uint32) OMC_DECLARE_LAUNCH(uint64)
+#undef OMC_DECLARE_LAUNCH
+
+} /* namespace gpu */
+} /* namespace omc */
+
+#endif /* OMC_GPU_RT_HPP */
