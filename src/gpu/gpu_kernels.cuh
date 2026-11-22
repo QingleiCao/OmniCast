@@ -44,23 +44,47 @@ template <class S, class D> struct Vw {
  * parallelism). Measured on V100 and H100 (docs/PROFILING.md): 4 rounds for
  * plain and scaled conversions (more rounds for widening ones, which read
  * fewer bytes per round, made them 2-9 % slower), 2 for stochastic rounding
- * (compute bound: fewer registers, more resident warps). The macros are for
- * such experiments. */
+ * from 4- and 2-byte sources (compute bound: fewer registers, more resident
+ * warps). The macros are for such experiments. */
+/* Defaults measured on V100/H100 (CUDA) and the Radeon VII (HIP), see
+ * docs/REPORT.md section 3.3. gfx906 prefers one vector per thread (fewer
+ * VGPRs, more waves in flight): 1.1-1.3x over 4 rounds on narrowing and
+ * widening conversions. */
+#if defined(OMC_BACKEND_HIP)
+#define OMC_DEF_NARROW 1
+#define OMC_DEF_WIDEN 1
+#define OMC_DEF_SR64 2
+#else
+#define OMC_DEF_NARROW 4
+#define OMC_DEF_WIDEN 4
+#define OMC_DEF_SR64 4
+#endif
 #ifndef OMC_ROUNDS_NARROW
-#define OMC_ROUNDS_NARROW 4
+#define OMC_ROUNDS_NARROW OMC_DEF_NARROW
 #endif
 #ifndef OMC_ROUNDS_WIDEN_MAX
-#define OMC_ROUNDS_WIDEN_MAX 4
+#define OMC_ROUNDS_WIDEN_MAX OMC_DEF_WIDEN
 #endif
 #ifndef OMC_ROUNDS_SR
 #define OMC_ROUNDS_SR 2
 #endif
-template <class S, class D, int MODE> struct Rounds {
+#ifndef OMC_ROUNDS_SR64
+#define OMC_ROUNDS_SR64 OMC_DEF_SR64
+#endif
+#ifndef OMC_ROUNDS_INPLACE
+#define OMC_ROUNDS_INPLACE 4    /* bigger chunks: fewer tickets and flags */
+#endif
+template <class S, class D, int MODE, int NARROW = OMC_ROUNDS_NARROW> struct Rounds {
     static constexpr int grow = sizeof(D) > sizeof(S) ? (int)(sizeof(D) / sizeof(S)) : 1;
     static constexpr int widen = (4 * grow < OMC_ROUNDS_WIDEN_MAX) ? 4 * grow : OMC_ROUNDS_WIDEN_MAX;
-    static constexpr int plain = grow > 1 ? (widen > OMC_ROUNDS_NARROW ? widen : OMC_ROUNDS_NARROW) : OMC_ROUNDS_NARROW;
-    static constexpr int value = (MODE == 2 || MODE == 3) ? OMC_ROUNDS_SR : plain;
+    static constexpr int plain = grow > 1 ? (widen > NARROW ? widen : NARROW) : NARROW;
+    /* stochastic rounding: 2 rounds (compute bound); from FP64 the 8-byte
+     * reads dominate: 4 rounds on NVIDIA (4-5 % faster), 2 on gfx906 */
+    static constexpr int sr = sizeof(S) == 8 ? OMC_ROUNDS_SR64 : OMC_ROUNDS_SR;
+    static constexpr int value = (MODE == 2 || MODE == 3) ? sr : plain;
 };
+/* k_inplace: chunks of OMC_ROUNDS_INPLACE rounds on every backend */
+template <class S, class D, int MODE> using RoundsIP = Rounds<S, D, MODE, OMC_ROUNDS_INPLACE>;
 
 /* N consecutive elements as ONE aligned load / store of N * sizeof(T) bytes.
  * The 32-bit words are assembled explicitly: through a union the compiler
@@ -149,6 +173,35 @@ struct ElemOp {
     }
 };
 
+/* 1-byte sources have 256 values: each block computes the 256 results in
+ * shared memory and converts an element with one lookup. FP8 -> FP8/BF16/
+ * int8 conversions were compute bound (about 40 integer operations per
+ * element for 2 bytes moved). */
+template <class S, int MODE> struct UseLut {
+    static constexpr bool value = sizeof(S) == 1 && (MODE == MODE_PLAIN || MODE == MODE_SCALED);
+};
+template <class S, class D, int MODE>
+struct Conv {
+    ElemOp<S, D, MODE> op;
+    const D *lut;
+    __device__ __forceinline__ D operator()(S s, uint32_t i, uint32_t j) const {
+        if constexpr (UseLut<S, MODE>::value) return lut[bits32(s) & 0xffu];
+        else return op(s, i, j);
+    }
+};
+/* fills the table (all threads of the block, then a barrier) */
+template <class S, class D, int MODE>
+__device__ __forceinline__ void fill_lut(D *lut, const ElemOp<S, D, MODE> &op) {
+    if constexpr (UseLut<S, MODE>::value) {
+        const int t = (int)(threadIdx.y * blockDim.x + threadIdx.x), nt = (int)(blockDim.x * blockDim.y);
+        for (int q = t; q < 256; q += nt) lut[q] = op(from_bits32<S>((uint32_t)q), 0u, 0u);
+        __syncthreads();
+    }
+}
+#define OMC_LUT_DECL(S, D, MODE) \
+    __shared__ __align__(16) unsigned char lut_raw_[UseLut<S, MODE>::value ? 256 * sizeof(D) : 16]; \
+    D *lut_ = reinterpret_cast<D *>(lut_raw_)
+
 /* ------------------------------------------------------------------------ */
 
 /* Rows of a column are split in block tiles of blockDim.x * VW * kRounds
@@ -163,7 +216,10 @@ k_cvt(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int6
     constexpr int kRounds = Rounds<S, D, MODE>::value;
     if ((MODE == MODE_SCALED || MODE == MODE_SR_SCALED) && scale_ptr) op.scale = scale_ptr[scale_index];
     const int64_t tile0 = (int64_t)blockIdx.x * blockDim.x * VW * kRounds;
-    if (tile0 >= dr) return;
+    if (tile0 >= dr) return;                 /* the whole block */
+    OMC_LUT_DECL(S, D, MODE);
+    fill_lut<S, D, MODE>(lut_, op);
+    const Conv<S, D, MODE> cv{op, lut_};
     for (int64_t j = (int64_t)blockIdx.y * blockDim.y + threadIdx.y; j < dc; j += (int64_t)gridDim.y * blockDim.y) {
         const S *srow = src + j * lds;
         D *drow = dst + j * ldd;
@@ -182,14 +238,14 @@ k_cvt(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int6
             if (full[r]) {
                 D w[VW];
 #pragma unroll
-                for (int k = 0; k < VW; k++) w[k] = op(v[r][k], (uint32_t)(i + k), (uint32_t)j);
+                for (int k = 0; k < VW; k++) w[k] = cv(v[r][k], (uint32_t)(i + k), (uint32_t)j);
                 vstore(drow + i, w);
             } else {
 #pragma unroll
                 for (int k = 0; k < VW; k++) {
                     const int64_t ii = i + k;
                     if (ii < dr)
-                        drow[ii] = (ii < m && jin) ? op(srow[ii], (uint32_t)ii, (uint32_t)j) : Zero<D>::get();
+                        drow[ii] = (ii < m && jin) ? cv(srow[ii], (uint32_t)ii, (uint32_t)j) : Zero<D>::get();
                 }
             }
         }
@@ -214,6 +270,9 @@ k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int
     constexpr int W = TP<D>::W, P = TP<D>::pitch;
     __shared__ __align__(16) unsigned char tile_raw[64 * P];
     if ((MODE == MODE_SCALED || MODE == MODE_SR_SCALED) && scale_ptr) op.scale = scale_ptr[scale_index];
+    OMC_LUT_DECL(S, D, MODE);
+    fill_lut<S, D, MODE>(lut_, op);
+    const Conv<S, D, MODE> cv{op, lut_};
     const int t = threadIdx.x;
     const int64_t i0 = (int64_t)blockIdx.x * 64;            /* source rows = dst columns */
     for (int64_t j0 = (int64_t)blockIdx.y * 64; j0 < dr; j0 += (int64_t)gridDim.y * 64) {   /* source columns = dst rows */
@@ -240,7 +299,7 @@ k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int
                 for (int q = 0; q < NL; q++) {
                     const int jj = tj + 4 * (jb + q);
                     const int64_t j = j0 + jj;
-                    const D w = in[q] ? op(v[q], (uint32_t)i, (uint32_t)j) : Zero<D>::get();
+                    const D w = in[q] ? cv(v[q], (uint32_t)i, (uint32_t)j) : Zero<D>::get();
                     *reinterpret_cast<D *>(tile_raw + ti * P + jj * (int)sizeof(D)) = w;
                 }
             }
@@ -287,7 +346,7 @@ __global__ void __launch_bounds__(kThreads)
 k_inplace(char *buf, int64_t count, int64_t m, int64_t ld, int strided, int vec, ElemOp<S, D, MODE> op,
           const float *scale_ptr, int scale_index, uint32_t *ws, uint32_t nchunks) {
     constexpr int VW = Vw<S, D>::value;
-    constexpr int kRounds = Rounds<S, D, MODE>::value;
+    constexpr int kRounds = RoundsIP<S, D, MODE>::value;
     constexpr int64_t C = (int64_t)kThreads * VW * kRounds;
     constexpr int64_t STEP = (int64_t)kThreads * VW;     /* between the rounds of a thread */
     constexpr bool shrink = sizeof(D) < sizeof(S);
@@ -295,6 +354,10 @@ k_inplace(char *buf, int64_t count, int64_t m, int64_t ld, int strided, int vec,
     __shared__ uint32_t s_ticket;
     __shared__ int s_last;
     if ((MODE == MODE_SCALED || MODE == MODE_SR_SCALED) && scale_ptr) op.scale = scale_ptr[scale_index];
+    OMC_LUT_DECL(S, D, MODE);
+    if constexpr (UseLut<S, MODE>::value)    /* the barrier below covers the table */
+        for (int q = (int)threadIdx.x; q < 256; q += (int)blockDim.x) lut_[q] = op(from_bits32<S>((uint32_t)q), 0u, 0u);
+    const Conv<S, D, MODE> cv{op, lut_};
     if (threadIdx.x == 0) s_ticket = atomicAdd(&ws[0], 1u);
     __syncthreads();
     const uint32_t chunk = shrink ? s_ticket : (nchunks - 1u - s_ticket);
@@ -324,13 +387,13 @@ k_inplace(char *buf, int64_t count, int64_t m, int64_t ld, int strided, int vec,
             vload(src + e0, v);
 #pragma unroll
             for (int k = 0; k < VW; k++) {
-                w[r][k] = op(v[k], ci, cj);
+                w[r][k] = cv(v[k], ci, cj);
                 if (POS) { if (++ci == (uint32_t)ld) { ci = 0; cj++; } }    /* contiguous: may cross a column */
             }
         } else {
 #pragma unroll
             for (int k = 0; k < VW; k++) {
-                if (e0 + k < count && (!strided || ci < (uint32_t)m)) w[r][k] = op(src[e0 + k], ci, cj);
+                if (e0 + k < count && (!strided || ci < (uint32_t)m)) w[r][k] = cv(src[e0 + k], ci, cj);
                 if (need_pos) { if (++ci == (uint32_t)ld) { ci = 0; cj++; } }
             }
         }
@@ -491,7 +554,7 @@ omc_status_t launch_mode(const LaunchArgs &a) {
             const int64_t ld = a.lds;
             const int64_t count = (a.n - 1) * ld + a.m;          /* linear range covering the matrix */
             const int strided = (ld != a.m) && (a.n > 1);
-            const int64_t C = (int64_t)kThreads * VW * kRounds;
+            const int64_t C = (int64_t)kThreads * VW * RoundsIP<S, D, MODE>::value;
             const int64_t nchunks = (count + C - 1) / C;
             const int vec = aligned16(a.dst);             /* else element by element */
             if (nchunks > 0x7fffffff || (size_t)(nchunks + kFlagsOffset) * 4 > a.ws_bytes) return OMC_ERROR_INVALID_VALUE;

@@ -7,6 +7,9 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
@@ -183,8 +186,73 @@ inline void run1d(const Plan &pl, const char *s, char *d, size_t n, uint32_t i0,
     pl.fn(s, d, n, p);
 }
 
+/* Large destinations: non-temporal stores. A plain store first reads the
+ * destination line (read for ownership): 20 bytes of traffic per FP32 ->
+ * FP64 element instead of 12. memcpy streams large copies; converting through
+ * an L1 buffer that is then streamed to dst does the same for conversions.
+ * Only above 16 MB of destination (data that large is not in the caches
+ * anyway; smaller results are often read next and should stay there), and
+ * not on Skylake-SP / Cascade Lake, where it is slower.
+ * OMNICAST_STREAM_BYTES overrides the threshold (0: never). */
+size_t stream_threshold() {
+    static const size_t t = [] {
+        const char *e = getenv("OMNICAST_STREAM_BYTES");
+        if (e) return (size_t)strtoull(e, nullptr, 10);
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__GNUC__)
+        /* Skylake-SP / Cascade Lake: one core streams slowly (FP32 -> FP64
+         * 10.5 -> 7.9 GB/s with non-temporal stores); off by default */
+        __builtin_cpu_init();
+        if (__builtin_cpu_is("skylake-avx512") || __builtin_cpu_is("cascadelake")) return (size_t)0;
+#endif
+        return (size_t)16 << 20;
+    }();
+    return t;
+}
+
+void run1d_stream(const Plan &pl, const char *s, char *d, size_t n, uint32_t i0, uint32_t j) {
+#if defined(__SSE2__)
+    constexpr size_t BB = 16384;                      /* bytes of dst per block (L1) */
+    alignas(64) char tmp[BB];
+    const size_t si = pl.si, so = pl.so;
+    /* head up to a 16-byte boundary of dst, converted directly */
+    size_t h = (size_t)((16 - ((uintptr_t)d & 15)) & 15);
+    if (h % so) { run1d(pl, s, d, n, i0, j); return; } /* dst not element-aligned to 16 bytes: plain */
+    h /= so;
+    if (h > n) h = n;
+    if (h) run1d(pl, s, d, h, i0, j);
+    const size_t per = BB / so;
+    size_t k = h;
+    for (; k + per <= n; k += per) {
+        run1d(pl, s + k * si, tmp, per, i0 + (uint32_t)k, j);
+        __m128i *dst = reinterpret_cast<__m128i *>(d + k * so);
+        const __m128i *src = reinterpret_cast<const __m128i *>(tmp);
+        for (size_t q = 0; q < BB / 16; q += 4) {
+            _mm_stream_si128(dst + q, _mm_load_si128(src + q));
+            _mm_stream_si128(dst + q + 1, _mm_load_si128(src + q + 1));
+            _mm_stream_si128(dst + q + 2, _mm_load_si128(src + q + 2));
+            _mm_stream_si128(dst + q + 3, _mm_load_si128(src + q + 3));
+        }
+    }
+    if (k < n) run1d(pl, s + k * si, d + k * so, n - k, i0 + (uint32_t)k, j);
+    _mm_sfence();
+#else
+    run1d(pl, s, d, n, i0, j);
+#endif
+}
+
+inline void run1d_auto(const Plan &pl, const char *s, char *d, size_t n, uint32_t i0, uint32_t j, bool stream) {
+    if (stream && !pl.memcpy_ok) run1d_stream(pl, s, d, n, i0, j);
+    else run1d(pl, s, d, n, i0, j);
+}
+
 void run1d_threads(const Plan &pl, const char *s, char *d, size_t n, int nt) {
-    if (nt <= 1) { run1d(pl, s, d, n, 0, 0); return; }
+    /* only where the destination dominates the traffic (the element keeps its
+     * size or grows) and the kernel is not compute bound (1-byte sources
+     * decode slowly on AVX2): measured 1.2-1.8x on Broadwell and Zen 2 for
+     * those, 0.8-0.9x for FP8 -> FP32 and FP32 -> INT8 on Zen 2 */
+    const size_t thr = stream_threshold();
+    const bool stream = thr != 0 && n * pl.so >= thr && pl.so >= pl.si && pl.si >= 2;
+    if (nt <= 1) { run1d_auto(pl, s, d, n, 0, 0, stream); return; }
 #if defined(_OPENMP)
     const size_t chunk = ((n + nt - 1) / nt + 63) & ~(size_t)63;
     #pragma omp parallel for num_threads(nt) schedule(static)
@@ -192,7 +260,7 @@ void run1d_threads(const Plan &pl, const char *s, char *d, size_t n, int nt) {
         const size_t b = (size_t)t * chunk;
         if (b < n) {
             const size_t e = std::min(n, b + chunk);
-            run1d(pl, s + b * pl.si, d + b * pl.so, e - b, (uint32_t)b, 0);
+            run1d_auto(pl, s + b * pl.si, d + b * pl.so, e - b, (uint32_t)b, 0, stream);
         }
     }
 #endif
