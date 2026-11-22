@@ -113,7 +113,7 @@ set_target_properties(omnicast PROPERTIES
 target_include_directories(omnicast PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-target_compile_definitions(omnicast PRIVATE ${_omc_defs}
+target_compile_definitions(omnicast PRIVATE ${_omc_defs} OMC_VERSION_STRING="${PROJECT_VERSION}"
     $<$<STREQUAL:${_omc_gpu},CUDA>:OMC_BACKEND_CUDA>
     $<$<STREQUAL:${_omc_gpu},HIP>:OMC_BACKEND_HIP>)
 # Conversions depend on IEEE semantics (NaN, Inf, subnormals): never
@@ -133,6 +133,11 @@ if(_omc_gpu STREQUAL "CUDA")
     target_link_libraries(omnicast PRIVATE CUDA::cudart)
 elseif(_omc_gpu STREQUAL "HIP")
     target_compile_options(omnicast PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-O3 -fno-fast-math -ffp-contract=off>)
+    # The HIP language links the runtime into OmniCast's own targets only;
+    # naming it lets a static OmniCast carry it to programs that do not
+    # enable HIP themselves.
+    find_package(hip REQUIRED)
+    target_link_libraries(omnicast PRIVATE hip::host)
 endif()
 
 if(OMNICAST_OPENMP)

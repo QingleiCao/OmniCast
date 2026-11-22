@@ -142,6 +142,18 @@ baseline/OmniCast runs:
   (band, adaptive, runtime decisions) show no measurable difference: their
   intervals contain zero, with up to 40 % between the fastest and the slowest run of one binary.
 
+Final state (HiCMA-X `f0ec341` with this OmniCast against `4256ff9`, the
+code before OmniCast; interleaved; `docs/omnicast/final/README.md` in HiCMA-X):
+
+- Residuals are identical in 10 configurations on the A100.
+- A100 at N = 45056:
+  - OmniCast alone: 1.01–1.04× (stochastic rounding 1.036×, faster in all 4
+    rounds);
+  - with HiCMA-X's GPU operand cache: up to 1.06× (stochastic rounding, kinds
+    8 and 10, faster in all 4 rounds).
+- 28-core Broadwell: stochastic rounding 1.03×; the other kinds unchanged.
+- The H100 with FP8 tiles was not available for this comparison.
+
 ## Profiling
 
 See [`REPORT.md`](REPORT.md), section 3: Nsight Compute on the A100, H100 and

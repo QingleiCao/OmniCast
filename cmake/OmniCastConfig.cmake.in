@@ -3,9 +3,20 @@
 include(CMakeFindDependencyMacro)
 set(OMNICAST_GPU_BACKEND "@_omc_gpu@")
 if(NOT @OMNICAST_BUILD_SHARED@)
+    # OmniCast is written in C++. A static library leaves the C++ runtime to the
+    # link of the program, which CMake does with the C++ toolchain only where
+    # C++ is enabled: enable it for C projects (find_package must then be
+    # called at directory scope, as usual).
+    get_property(_omc_languages GLOBAL PROPERTY ENABLED_LANGUAGES)
+    if(NOT "CXX" IN_LIST _omc_languages)
+        enable_language(CXX)
+    endif()
+    unset(_omc_languages)
     # a static library carries its private dependencies to the link line
     if(OMNICAST_GPU_BACKEND STREQUAL "CUDA")
         find_dependency(CUDAToolkit)
+    elseif(OMNICAST_GPU_BACKEND STREQUAL "HIP")
+        find_dependency(hip)
     endif()
     if(@OpenMP_CXX_FOUND@)
         find_dependency(OpenMP COMPONENTS CXX)

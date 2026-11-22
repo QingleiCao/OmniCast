@@ -68,6 +68,7 @@ const char *omc_status_string(omc_status_t s) {
     return "unknown status";
 }
 
-const char *omc_version_string(void) { return "2.0.0"; }
+/* OMC_VERSION_STRING comes from project(OmniCast VERSION ...) in CMakeLists.txt */
+const char *omc_version_string(void) { return OMC_VERSION_STRING; }
 
 } /* extern "C" */

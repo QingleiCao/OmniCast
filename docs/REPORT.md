@@ -625,9 +625,25 @@ round's A/B runs:
 
 This round speeds up the conversions HiCMA-X uses for FP8 operands (kinds
 8/9) and its in-place tile conversions. Its most frequent stochastic
-rounding, from FP64, was already memory bound and is unchanged. End-to-end
-factorization times were not measured again in this round. HiCMA-X's own
-documentation has the details (`docs/omnicast/README.md`).
+rounding, from FP64, was already memory bound and is unchanged.
+
+After round 3, HiCMA-X with this OmniCast (`f0ec341`, OmniCast `0c59754`)
+was measured again against HiCMA-X before OmniCast (`4256ff9`). Both were
+built side by side with the same options, and the runs were interleaved
+(HiCMA-X `docs/omnicast/final/README.md`):
+
+| | without OmniCast → OmniCast | → OmniCast + HiCMA-X operand cache |
+|---|---|---|
+| residuals, A100, 10 configurations | identical | identical |
+| A100, N = 45056: stochastic rounding | 1.036× (4/4 rounds faster) | 1.059× (4/4) |
+| A100: FP16 band kinds | 1.017–1.024× (4/4) | 1.013–1.024× |
+| A100: kinds 8 (FP16 there) and 10 | 1.004–1.017× | 1.062–1.063× (4/4) |
+| A100: other adaptive kinds | 0.989–1.015× (noise: FP64 dense 1.011×) | 0.994–1.023× |
+| CPU, 28-core Broadwell, N = 16384: stochastic rounding | 1.030× (9/10) | – |
+| CPU: other kinds | 0.998–1.029×, intervals contain 1 | – |
+
+The H100 with FP8 tiles, where conversions take the most time, was not
+available for this comparison.
 
 ### 4.7 How much of HiCMA-X the remaining gaps touch
 

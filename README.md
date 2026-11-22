@@ -81,8 +81,11 @@ Options: `CMAKE_CUDA_ARCHITECTURES` / `CMAKE_HIP_ARCHITECTURES`,
 `OMNICAST_BUILD_SHARED` (default static, position independent),
 `OMNICAST_OPENMP` (host threads for `num_threads > 1`),
 `OMNICAST_BUILD_TESTS`, `OMNICAST_BUILD_BENCHMARKS`, `OMNICAST_INSTALL`.
-Installed, `find_package(OmniCast)` gives `OmniCast::omnicast`. As a
-subdirectory, link `omnicast`. `OMNICAST_CPU_ISA=avx2` (or `omc_cpu_set_isa`)
+Installed, `find_package(OmniCast)` gives `OmniCast::omnicast`, also to C
+projects: a static OmniCast enables C++ in the project that finds it, because
+the program links the C++ runtime (`tests/install_consumer` is such a C
+program; CI builds it against the installed package). As a subdirectory, link
+`omnicast`. `OMNICAST_CPU_ISA=avx2` (or `omc_cpu_set_isa`)
 forces a CPU code path. `OMNICAST_STREAM_BYTES` sets the destination size
 above which host conversions use streaming stores (0: never).
 `OMNICAST_FUSED_DYNAMIC=1` makes transposed GPU conversions with

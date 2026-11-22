@@ -1,0 +1,113 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main, v2]
+
+jobs:
+  cpu:
+    name: CPU build, tests, install
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build
+
+      - name: Runner CPU
+        run: |
+          lscpu | grep -E '^(Model name|CPU\(s\)):' || true
+          echo "AVX-512: $(grep -o -w 'avx512[a-z_]*' /proc/cpuinfo | sort -u | tr '\n' ' ')"
+          echo "F16C: $(grep -c -w f16c /proc/cpuinfo) cores"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DOMNICAST_GPU_BACKEND=NONE -DOMNICAST_BUILD_BENCHMARKS=ON \
+            -DCMAKE_C_FLAGS="-Wall -Wextra" -DCMAKE_CXX_FLAGS="-Wall -Wextra" \
+            -DCMAKE_INSTALL_PREFIX=$PWD/install
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Tests (every pair on every CPU code path of the runner)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Generic code path
+        env:
+          OMNICAST_CPU_ISA: generic
+        run: ./build/tests/omnicast_test_modes
+
+      - name: Install, then a C program against the installed package (static and shared)
+        run: |
+          cmake --install build
+          cmake -S tests/install_consumer -B build-consumer -DCMAKE_PREFIX_PATH=$PWD/install
+          cmake --build build-consumer
+          ./build-consumer/omnicast_consumer
+          cmake -S . -B build-shared -G Ninja -DCMAKE_BUILD_TYPE=Release -DOMNICAST_GPU_BACKEND=NONE \
+            -DOMNICAST_BUILD_SHARED=ON -DOMNICAST_BUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=$PWD/install-shared
+          cmake --build build-shared
+          cmake --install build-shared
+          cmake -S tests/install_consumer -B build-consumer-shared -DCMAKE_PREFIX_PATH=$PWD/install-shared
+          cmake --build build-consumer-shared
+          ./build-consumer-shared/omnicast_consumer
+
+  cuda-compile:
+    name: CUDA build (compile only)
+    runs-on: ubuntu-22.04
+    container: nvidia/cuda:12.6.2-devel-ubuntu22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DOMNICAST_GPU_BACKEND=CUDA -DCMAKE_CUDA_ARCHITECTURES="70;80;90" \
+            -DOMNICAST_BUILD_BENCHMARKS=ON -DCMAKE_INSTALL_PREFIX=$PWD/install
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Install, then build a C program against the installed package
+        run: |
+          cmake --install build
+          cmake -S tests/install_consumer -B build-consumer -DCMAKE_PREFIX_PATH=$PWD/install
+          cmake --build build-consumer
+
+  hip-compile:
+    name: HIP build (compile only)
+    runs-on: ubuntu-22.04
+    container: rocm/dev-ubuntu-22.04:6.3.2
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DOMNICAST_GPU_BACKEND=HIP -DCMAKE_HIP_ARCHITECTURES="gfx906;gfx90a" \
+            -DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++ -DCMAKE_PREFIX_PATH=/opt/rocm \
+            -DOMNICAST_BUILD_BENCHMARKS=ON -DCMAKE_INSTALL_PREFIX=$PWD/install
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Install, then build a C program against the installed package
+        run: |
+          cmake --install build
+          cmake -S tests/install_consumer -B build-consumer -DCMAKE_PREFIX_PATH="$PWD/install;/opt/rocm"
+          cmake --build build-consumer
