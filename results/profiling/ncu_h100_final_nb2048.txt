@@ -1,5 +1,5 @@
 
-## /home/qcao3/hicma-x-omnicast-logs/prof/h100_final_nb2048.csv  (nb = 2048)
+## h100_final_nb2048.csv.gz  (nb = 2048)
 case             kernel                 us DRAM/min  DRAM%   SM% issue%  occ% regs inst/el L2hit  top stall reasons
 fp64>fp32        k_cvt                23.2     0.76   81.1  15.1   18.3  40.4   60    21.2  35.6  long_scoreboard, wait, selected
 fp32>fp64        k_cvt                19.3     0.55   70.1  19.6   25.6  39.4   54    23.0  68.9  long_scoreboard, wait, short_scoreboard

@@ -3,12 +3,14 @@
 # usage: measure.sh "<builds>" nb [extra env]
 for v in $(env | grep -oE '^(SLURM|PMIX|PMI|OMPI_MCA_ess|PRTE)[A-Za-z0-9_]*'); do unset $v; done
 BUILDS=$1; NB=${2:-8192}; P=$((NB + 16))
-declare -A BIN=( [before]=/home/qcao3/omnicast-before/build_cuda/bench/omnicast_prof_gpu
-                 [a]=/home/qcao3/omc-variants/a/bench/omnicast_prof_gpu [b]=/home/qcao3/omc-variants/b/bench/omnicast_prof_gpu
-                 [c]=/home/qcao3/omc-variants/c/bench/omnicast_prof_gpu [d]=/home/qcao3/omc-variants/d/bench/omnicast_prof_gpu
-                 [e]=/home/qcao3/omc-variants/e/bench/omnicast_prof_gpu [f]=/home/qcao3/omc-variants/f/bench/omnicast_prof_gpu
-                 [cur]=/home/qcao3/hicma-x/omnicast/build_cuda/bench/omnicast_prof_gpu
-                 [next]=/home/qcao3/hicma-x/omnicast/build_cuda_next/bench/omnicast_prof_gpu )
+# OMC_BEFORE: a build of the code before the round (commit 3eee555, e.g. a git
+# worktree), OMC_VARIANTS: the builds of variants_build.sh, OMC_CUR: the build
+# of the current tree
+V=${OMC_VARIANTS:-$HOME/omc-variants}
+declare -A BIN=( [before]=${OMC_BEFORE:-$HOME/omnicast-before/build_cuda}/bench/omnicast_prof_gpu
+                 [a]=$V/a/bench/omnicast_prof_gpu [b]=$V/b/bench/omnicast_prof_gpu
+                 [c]=$V/c/bench/omnicast_prof_gpu [d]=$V/d/bench/omnicast_prof_gpu
+                 [cur]=${OMC_CUR:-$(cd "$(dirname "$0")/../.." && pwd)/build_cuda}/bench/omnicast_prof_gpu )
 while read -r name args; do
   [ -z "$name" ] && continue
   for b in $BUILDS; do
