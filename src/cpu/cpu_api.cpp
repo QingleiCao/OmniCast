@@ -74,6 +74,14 @@ void init_tables() {
     fill_table_avx512(g_avx512);
     if (g_avx512.name && cpu_has_avx512()) best = &g_avx512;
 #endif
+#if defined(OMC_HAVE_AVX2_TU) && defined(OMC_HAVE_AVX512_TU)
+    /* float -> integer: the AVX2 kernels (clamp, truncating convert,
+     * saturating packs) beat the generic AVX-512 loops (fp32 -> int8: 0.16
+     * against 0.22 ns per element on Skylake-SP) */
+    if (g_avx512.name && g_avx2.name)
+        for (int s = OMC_FP64; s <= OMC_FP32; s++)
+            for (int d : {OMC_INT8, OMC_INT16, OMC_INT32}) g_avx512.cvt[s][d] = g_avx2.cvt[s][d];
+#endif
     const Table *forced = pick(getenv("OMNICAST_CPU_ISA"));
     g_active.store(forced ? forced : best);
 }

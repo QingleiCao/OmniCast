@@ -125,11 +125,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(omnicast PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:-O3 -fno-fast-math -fno-math-errno -fno-trapping-math>)
 endif()
+# No floating-point contraction on the device: a product followed by a
+# conversion must round twice, as on the host (gfx906 otherwise fuses an FP32
+# multiply and the FP16 conversion into one v_mad_mix, rounding once).
 if(_omc_gpu STREQUAL "CUDA")
-    target_compile_options(omnicast PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3 --ftz=false --prec-div=true>)
+    target_compile_options(omnicast PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3 --ftz=false --prec-div=true --fmad=false>)
     target_link_libraries(omnicast PRIVATE CUDA::cudart)
 elseif(_omc_gpu STREQUAL "HIP")
-    target_compile_options(omnicast PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-O3 -fno-fast-math>)
+    target_compile_options(omnicast PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-O3 -fno-fast-math -ffp-contract=off>)
 endif()
 
 if(OMNICAST_OPENMP)

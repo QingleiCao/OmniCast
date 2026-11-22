@@ -10,11 +10,13 @@
 #include <cmath>
 #include <vector>
 #include <random>
+#include <typeinfo>
 #include <string>
 #include "omnicast/omnicast.h"
 #include "../src/core/omc_scalar.hpp"
 #include "../src/cpu/cpu_kernels.hpp"
 #include "legacy_hicma_sr.h"
+#include "legacy_sr_ref.h"
 
 using namespace omc;
 
@@ -229,6 +231,87 @@ static void test_sr() {
 
 /* ---- 2-D, transposition, padding ----------------------------------------- */
 
+/* The integer stochastic rounding of omc_scalar.hpp against the floating-
+ * point form it replaced (tests/legacy_sr_ref.h), on every SR pair: random
+ * values over the whole exponent range (target subnormals, the overflow
+ * region, NaN, Inf, signed zeros), random positions and seeds, both
+ * saturation modes, and every FP32 bit pattern with a stride of 61. */
+template <class D, class S>
+static long sr_ref_pair(const S *v, size_t n, std::mt19937_64 &g) {
+    long bad = 0;
+    for (int sat = 0; sat < 2; sat++) {
+        const ElemOpts o{sat != 0, false};
+        for (size_t k = 0; k < n; k++) {
+            const uint32_t i = (uint32_t)g(), j = (uint32_t)g();
+            const uint64_t seed = g();
+            const D a = SR<D, S>::go(v[k], i, j, seed, o);
+            const D b = ref::SR<D, S>::go(v[k], i, j, seed, o);
+            if (memcmp(&a, &b, sizeof(D))) {
+                if (bad < 3) {
+                    double x = (double)Src<S>::get(v[k]);
+                    uint64_t ua = 0, ub = 0; memcpy(&ua, &a, sizeof(D)); memcpy(&ub, &b, sizeof(D));
+                    printf("  SR %s <- %s, x = %a sat %d: 0x%llx, reference 0x%llx\n", typeid(D).name(), typeid(S).name(),
+                           x, sat, (unsigned long long)ua, (unsigned long long)ub);
+                }
+                bad++;
+            }
+        }
+    }
+    return bad;
+}
+
+static void test_sr_integer_core() {
+    std::mt19937_64 g(99);
+    const size_t N = 1 << 21;
+    std::vector<double> d(N);
+    std::vector<float> f(N);
+    for (size_t k = 0; k < N; k++) {
+        const uint64_t r = g();
+        double x;
+        switch (r % 7) {
+        case 0: x = ldexp((double)(g() >> 11) / 9007199254740992.0, (int)(g() % 2200) - 1100); break;  /* any exponent */
+        case 1: x = ldexp((double)(g() >> 11) / 9007199254740992.0, (int)(g() % 60) - 40); break;
+        case 2: { static const double sp[] = {0.0, -0.0, INFINITY, -INFINITY, NAN, 65504.0, 65519.99, 65520.0, 448.0,
+                   464.0, 480.0, 57344.0, 61440.0, 3.4028234663852886e38, 3.4028235677973366e38, 1e39, 5.96e-8,
+                   2.98e-8, 1.4e-45, 7e-46, 1.1754943508222875e-38, 1.9531250e-03, 1.52587890625e-05, 6.103515625e-05};
+                  x = sp[g() % (sizeof(sp) / sizeof(sp[0]))]; break; }
+        case 3: { uint64_t b = g(); memcpy(&x, &b, 8); break; }                                         /* any pattern */
+        case 4: x = (double)(float)ldexp((double)(g() >> 40), (int)(g() % 300) - 170); break;            /* FP32 values */
+        default: x = ((double)(g() >> 11) / 9007199254740992.0 - 0.5) * 1000.0; break;
+        }
+        if (r & 0x100) x = -x;
+        d[k] = x;
+        f[k] = (float)x;
+        if ((r >> 12) % 5 == 0) { uint32_t b = (uint32_t)g(); memcpy(&f[k], &b, 4); }
+    }
+    std::vector<f16> h(N);
+    std::vector<bf16> bh(N);
+    for (size_t k = 0; k < N; k++) { h[k].bits = (uint16_t)g(); bh[k].bits = (uint16_t)g(); }
+    long bad = 0;
+    bad += sr_ref_pair<float, double>(d.data(), N, g);
+    bad += sr_ref_pair<f16, double>(d.data(), N, g);
+    bad += sr_ref_pair<bf16, double>(d.data(), N, g);
+    bad += sr_ref_pair<e4m3, double>(d.data(), N, g);
+    bad += sr_ref_pair<e5m2, double>(d.data(), N, g);
+    bad += sr_ref_pair<f16, float>(f.data(), N, g);
+    bad += sr_ref_pair<bf16, float>(f.data(), N, g);
+    bad += sr_ref_pair<e4m3, float>(f.data(), N, g);
+    bad += sr_ref_pair<e5m2, float>(f.data(), N, g);
+    bad += sr_ref_pair<e4m3, f16>(h.data(), N, g);
+    bad += sr_ref_pair<e5m2, f16>(h.data(), N, g);
+    bad += sr_ref_pair<e4m3, bf16>(bh.data(), N, g);
+    bad += sr_ref_pair<e5m2, bf16>(bh.data(), N, g);
+    /* every FP32 pattern with a stride of 61 (70M values) into FP16 and E4M3 */
+    std::vector<float> all;
+    all.reserve((1ull << 32) / 61 + 1);
+    for (uint64_t b = 0; b < (1ull << 32); b += 61) { float x; uint32_t u = (uint32_t)b; memcpy(&x, &u, 4); all.push_back(x); }
+    bad += sr_ref_pair<f16, float>(all.data(), all.size(), g);
+    bad += sr_ref_pair<e4m3, float>(all.data(), all.size(), g);
+    CHECK(bad == 0, "integer stochastic rounding differs from the floating-point form at %ld values", bad);
+    printf("  stochastic rounding: integer core = floating-point form on %zu values x 13 pairs + %zu FP32 patterns x 2, both saturation modes\n",
+           2 * N, 2 * all.size());
+}
+
 static void test_2d() {
     std::mt19937_64 g(5);
     const omc_dtype_t pairs[][2] = {{OMC_FP64, OMC_FP32}, {OMC_FP64, OMC_FP8_E4M3}, {OMC_FP32, OMC_FP16},
@@ -368,6 +451,7 @@ int main() {
     for (const char *isa : {"generic", "avx2", "avx512"}) test_pairs(isa);
     omc_cpu_set_isa(isa0);
     test_sr();
+    test_sr_integer_core();
     test_2d();
     test_inplace();
     test_misc();

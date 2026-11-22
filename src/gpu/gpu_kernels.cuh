@@ -40,7 +40,27 @@ template <class S, class D> struct Vw {
     static constexpr int ws = (int)(sizeof(S) > sizeof(D) ? sizeof(S) : sizeof(D));
     static constexpr int value = 16 / ws;
 };
-constexpr int kRounds = 4;     /* vectors per thread (in flight together) */
+/* Vectors per thread, loaded together before any is converted (memory-level
+ * parallelism). Measured on V100 and H100 (docs/PROFILING.md): 4 rounds for
+ * plain and scaled conversions (more rounds for widening ones, which read
+ * fewer bytes per round, made them 2-9 % slower), 2 for stochastic rounding
+ * (compute bound: fewer registers, more resident warps). The macros are for
+ * such experiments. */
+#ifndef OMC_ROUNDS_NARROW
+#define OMC_ROUNDS_NARROW 4
+#endif
+#ifndef OMC_ROUNDS_WIDEN_MAX
+#define OMC_ROUNDS_WIDEN_MAX 4
+#endif
+#ifndef OMC_ROUNDS_SR
+#define OMC_ROUNDS_SR 2
+#endif
+template <class S, class D, int MODE> struct Rounds {
+    static constexpr int grow = sizeof(D) > sizeof(S) ? (int)(sizeof(D) / sizeof(S)) : 1;
+    static constexpr int widen = (4 * grow < OMC_ROUNDS_WIDEN_MAX) ? 4 * grow : OMC_ROUNDS_WIDEN_MAX;
+    static constexpr int plain = grow > 1 ? (widen > OMC_ROUNDS_NARROW ? widen : OMC_ROUNDS_NARROW) : OMC_ROUNDS_NARROW;
+    static constexpr int value = (MODE == 2 || MODE == 3) ? OMC_ROUNDS_SR : plain;
+};
 
 /* N consecutive elements as ONE aligned load / store of N * sizeof(T) bytes.
  * The 32-bit words are assembled explicitly: through a union the compiler
@@ -140,6 +160,7 @@ __global__ void __launch_bounds__(kThreads)
 k_cvt(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int64_t dr, int64_t dc,
       ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index, int vec) {
     constexpr int VW = Vw<S, D>::value;
+    constexpr int kRounds = Rounds<S, D, MODE>::value;
     if ((MODE == MODE_SCALED || MODE == MODE_SR_SCALED) && scale_ptr) op.scale = scale_ptr[scale_index];
     const int64_t tile0 = (int64_t)blockIdx.x * blockDim.x * VW * kRounds;
     if (tile0 >= dr) return;
@@ -196,14 +217,32 @@ k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int
     const int t = threadIdx.x;
     const int64_t i0 = (int64_t)blockIdx.x * 64;            /* source rows = dst columns */
     for (int64_t j0 = (int64_t)blockIdx.y * 64; j0 < dr; j0 += (int64_t)gridDim.y * 64) {   /* source columns = dst rows */
-        {   /* read: thread (ti = t % 64, tj = t / 64), columns tj, tj + 4, ... */
+        {   /* read: thread (ti = t % 64, tj = t / 64), columns tj, tj + 4, ...;
+             * the OMC_T_LOADS loads of a thread are issued before any
+             * conversion, so that they are in flight together */
+#ifndef OMC_T_LOADS
+#define OMC_T_LOADS 16
+#endif
             const int ti = t & 63, tj = t >> 6;
             const int64_t i = i0 + ti;
-#pragma unroll 4
-            for (int jj = tj; jj < 64; jj += 4) {
-                const int64_t j = j0 + jj;
-                const D v = (i < m && j < n) ? op(src[j * lds + i], (uint32_t)i, (uint32_t)j) : Zero<D>::get();
-                *reinterpret_cast<D *>(tile_raw + ti * P + jj * (int)sizeof(D)) = v;
+            constexpr int NL = OMC_T_LOADS;
+#pragma unroll
+            for (int jb = 0; jb < 16; jb += NL) {
+                S v[NL];
+                bool in[NL];
+#pragma unroll
+                for (int q = 0; q < NL; q++) {
+                    const int64_t j = j0 + tj + 4 * (jb + q);
+                    in[q] = (i < m && j < n);
+                    if (in[q]) v[q] = src[j * lds + i];
+                }
+#pragma unroll
+                for (int q = 0; q < NL; q++) {
+                    const int jj = tj + 4 * (jb + q);
+                    const int64_t j = j0 + jj;
+                    const D w = in[q] ? op(v[q], (uint32_t)i, (uint32_t)j) : Zero<D>::get();
+                    *reinterpret_cast<D *>(tile_raw + ti * P + jj * (int)sizeof(D)) = w;
+                }
             }
         }
         __syncthreads();
@@ -231,6 +270,14 @@ k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int
     }
 }
 
+__device__ __forceinline__ uint32_t load_flag(const uint32_t *p) {
+#if defined(__HIPCC__)
+    return __hip_atomic_load(p, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+#else
+    return *reinterpret_cast<const volatile uint32_t *>(p);
+#endif
+}
+
 /* Element e of the linear range [0, count) is (i, j) = (e % ld, e / ld); with
  * ld > m (strided) the elements with i >= m are gaps, neither read nor
  * written. Chunks are ranges of the linear index, so the ordering argument is
@@ -240,6 +287,7 @@ __global__ void __launch_bounds__(kThreads)
 k_inplace(char *buf, int64_t count, int64_t m, int64_t ld, int strided, int vec, ElemOp<S, D, MODE> op,
           const float *scale_ptr, int scale_index, uint32_t *ws, uint32_t nchunks) {
     constexpr int VW = Vw<S, D>::value;
+    constexpr int kRounds = Rounds<S, D, MODE>::value;
     constexpr int64_t C = (int64_t)kThreads * VW * kRounds;
     constexpr int64_t STEP = (int64_t)kThreads * VW;     /* between the rounds of a thread */
     constexpr bool shrink = sizeof(D) < sizeof(S);
@@ -287,10 +335,11 @@ k_inplace(char *buf, int64_t count, int64_t m, int64_t ld, int strided, int vec,
             }
         }
     }
-    __syncthreads();                       /* the whole chunk is in registers */
+    __syncthreads();                       /* the whole chunk is in registers (the conversion consumed the loads) */
     uint32_t *flags = ws + kFlagsOffset;
     if (threadIdx.x == 0) {
-        __threadfence();
+        /* no fence before the flag: this block wrote nothing yet, and its
+         * loads are complete */
         atomicExch(&flags[chunk], 1u);
         /* input chunks overlapped by this chunk's output */
         const int64_t ob0 = c0 * (int64_t)sizeof(D);
@@ -299,10 +348,10 @@ k_inplace(char *buf, int64_t count, int64_t m, int64_t ld, int strided, int vec,
         const int64_t cb  = C * (int64_t)sizeof(S);
         uint32_t lo = (uint32_t)(ob0 / cb), hi = (uint32_t)((ob1 - 1) / cb);
         if (hi > nchunks - 1u) hi = nchunks - 1u;
-        for (uint32_t q = lo; q <= hi; q++)
+        for (uint32_t q = lo; q <= hi; q++)     /* device-coherent loads, not read-modify-write atomics */
             if (q != chunk)
-                while (atomicAdd(&flags[q], 0u) == 0u) { }
-        __threadfence();
+                while (load_flag(&flags[q]) == 0u) { }
+        __threadfence();                   /* the stores below after the flags were seen */
     }
     __syncthreads();
 #pragma unroll
@@ -320,10 +369,8 @@ k_inplace(char *buf, int64_t count, int64_t m, int64_t ld, int strided, int vec,
         }
     }
     __syncthreads();
-    if (threadIdx.x == 0) {
-        __threadfence();
+    if (threadIdx.x == 0)                  /* this block has seen all the flags it needs */
         s_last = (atomicAdd(&ws[1], 1u) == gridDim.x - 1u);
-    }
     __syncthreads();
     if (s_last) {                          /* every other block is done: reset */
         for (uint32_t q = threadIdx.x; q < nchunks; q += blockDim.x) flags[q] = 0u;
@@ -408,6 +455,7 @@ omc_status_t launch_mode(const LaunchArgs &a) {
     op.scale = a.scale;
     op.seed = a.seed;
     constexpr int VW = Vw<S, D>::value;
+    constexpr int kRounds = Rounds<S, D, MODE>::value;
     const S *src = static_cast<const S *>(a.src);
     D *dst = static_cast<D *>(a.dst);
     switch (a.op) {

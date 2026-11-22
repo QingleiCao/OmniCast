@@ -437,14 +437,11 @@ OMC_HD uint64_t splitmix64(uint64_t x) {
     return x;
 }
 
-/** Uniform in [0, 1), a multiple of 2^-24, from the position (i, j), the
- *  seed and the bits of the value: independent of how the work is split. */
-OMC_HD float sr_u01(uint32_t i, uint32_t j, uint64_t seed, uint64_t bits) {
+/** The 24-bit uniform integer of element (i, j): independent of how the work
+ *  is split. u = u24 * 2^-24 is the uniform number in [0, 1) of HiCMA-X 0.2. */
+OMC_HD uint32_t sr_u24(uint32_t i, uint32_t j, uint64_t seed, uint64_t bits) {
     const uint64_t pos = (uint64_t)i | ((uint64_t)j << 32);
-    /* a 24-bit integer: converted through int32 (exact, and AVX2 has no
-     * vector uint64 -> float conversion) */
-    const int32_t r = (int32_t)(uint32_t)(splitmix64(bits ^ splitmix64(pos ^ seed)) >> 40);
-    return (float)r * (1.0f / 16777216.0f);
+    return (uint32_t)(splitmix64(bits ^ splitmix64(pos ^ seed)) >> 40);
 }
 
 template <class S> OMC_HD uint64_t sr_bits(S s);
@@ -453,18 +450,79 @@ template <> OMC_HD uint64_t sr_bits<float>(float s)   { return (uint64_t)f2u(s);
 template <> OMC_HD uint64_t sr_bits<f16>(f16 s)       { return (uint64_t)s.bits; }
 template <> OMC_HD uint64_t sr_bits<bf16>(bf16 s)     { return (uint64_t)s.bits; }
 
+/**
+ * Stochastic rounding on the integer grid of the target.
+ *
+ * HiCMA-X 0.2 rounds a = |x| down to lo, the largest representable value
+ * <= a, when u < p = (up - a) / (up - lo), up the next value. up - lo is a
+ * power of two (the step), so with t = (a - lo) / step, an exact binary
+ * fraction, u < 1 - t <=> u24 + 2^24 t < 2^24 <=> u24 + floor(2^24 t) < 2^24
+ * (u24 is an integer). So: round up exactly when u24 + t24 carries into bit
+ * 24, t24 the top 24 bits of the fraction t. lo and the bits of t come from
+ * the bit pattern of a (source of MS mantissa bits and bias BS) by a shift:
+ * no floating-point operation, no division, no branch, same results.
+ *
+ * a: bits of a finite value >= 0. Target with M mantissa bits and bias B.
+ * Returns the code of the result (lo or lo + 1; up may be the next binade).
+ */
+template <class U, int MS, int BS, int M, int B>
+OMC_HD uint32_t sr_code(U ab, uint32_t u24) {
+    /* all the exponent arithmetic in the width of U, so that the variable
+     * shifts vectorize (x86 shifts 64-bit lanes by 64-bit counts) */
+    using I = typename std::conditional<sizeof(U) == 8, int64_t, int32_t>::type;
+    constexpr I W = (I)sizeof(U) * 8;
+    constexpr I EMIN = 1 - B;                           /* smallest normal exponent of the target */
+    const I ea = (I)(ab >> MS);
+    const U mant = ab & ((U(1) << MS) - 1u);
+    const U sig = (ea != 0) ? (mant | (U(1) << MS)) : mant;
+    const I e = ((ea != 0) ? ea : (I)1) - (I)BS;        /* a = sig * 2^(e - MS) */
+    const I d = EMIN - e;                               /* > 0: subnormal in the target */
+    const I k = (I)(MS - M) + (d > 0 ? d : (I)0);       /* bits of sig below the step */
+    const U kc = (U)(k < W - 1 ? k : W - 1);
+    const U ebase = (d > 0) ? U(0) : (U)(e + (I)B - 1);
+    const U q = sig >> kc;
+    const uint32_t lo = (uint32_t)((ebase << M) + q);
+    const U r = sig - (q << kc);              /* not sig & ((1 << kc) - 1): GCC narrows that count to 32 bits */
+    const I sh = k - 24;
+    const U shr = (U)(sh > 0 ? (sh < W - 1 ? sh : W - 1) : (I)0), shl = (U)(sh < 0 ? -sh : (I)0);
+    const uint32_t t24 = (uint32_t)((r >> shr) << shl);
+    return lo + ((u24 + t24) >> 24);
+}
+
+/** Bits of |x| for the integer core: FP64 sources in 64 bits, the others as
+ *  FP32 (exact) in 32 bits. */
+template <class S> struct SrAbs {
+    using U = uint32_t;
+    static constexpr int MS = 23, BS = 127;
+    OMC_HD static float val(S s) { return Src<S>::get(s); }
+    OMC_HD static U bits(S s) { return f2u(fabsf(val(s))); }
+    OMC_HD static bool neg(S s) { return (f2u(val(s)) >> 31) != 0; }
+};
+template <> struct SrAbs<double> {
+    using U = uint64_t;
+    static constexpr int MS = 52, BS = 1023;
+    OMC_HD static double val(double s) { return s; }
+    OMC_HD static U bits(double s) { return d2u(s) & 0x7fffffffffffffffULL; }
+    OMC_HD static bool neg(double s) { return (d2u(s) >> 63) != 0; }
+};
+
+/** Stochastic rounding of one element at position (i, j). Above the largest
+ *  finite value of the target, and for NaN and Inf, the rules of HiCMA-X 0.2
+ *  (round to nearest) apply. */
+template <class D, class S> struct SR;
+/* FP32 target (from FP64): the floating-point form is faster than the integer
+ * core on x86 (FP64 lanes; the integer form needs 64-bit shifts and selects)
+ * and gives the same results. */
 OMC_HD float nextup_f32(float x)   { return u2f(f2u(x) + 1u); }   /* x >= 0 finite */
 /** (u - a) / step for a power of two step: the product by 1/step is the
  *  same correctly rounded number as the quotient, without a division */
 OMC_HD double div_pow2(double num, double step) {
     return num * u2d(0x7fe0000000000000ULL - d2u(step));
 }
-OMC_HD float nextdown_f32(float x) { return u2f(f2u(x) - 1u); }   /* x > 0 */
-
-/** FP32 target: round down with probability (upper - a) / (upper - lower).
- *  Branch-free form of the HiCMA-X 0.2 code (same results), so that it
- *  vectorizes; the lanes it does not use may compute garbage. */
-OMC_HD float sr_f32(double value, float random) {
+/** round down with probability (upper - a) / (upper - lower), branch-free
+ *  form of HiCMA-X 0.2; random = u24 * 2^-24 */
+OMC_HD float sr_f32(double value, uint32_t u24) {
+    const float random = (float)(int32_t)u24 * (1.0f / 16777216.0f);
     const float nearest = (float)value;
     const double a = fabs(value);
     const float n = fabsf(nearest);
@@ -479,8 +537,16 @@ OMC_HD float sr_f32(double value, float random) {
                    & (nb < 0x7f800000u) & (f2u(upper) < 0x7f800000u);
     return (fin & (gt | lt)) ? r : nearest;
 }
-
-/** FP16 code -> FP32: the hardware convert on GPUs */
+template <class S> struct SR<float, S> {
+    OMC_HD static float go(S s, uint32_t i, uint32_t j, uint64_t seed, const ElemOpts &o) {
+        const double v = (double)Src<S>::get(s);
+        const float r = sr_f32(v, sr_u24(i, j, seed, sr_bits(s)));
+        return Enc<float>::from_f32(r, o);   /* saturation of +-Inf */
+    }
+};
+/** FP16 target from FP64 on GPUs, where FP64 arithmetic is cheaper than the
+ *  64-bit integer core: the floating-point form of HiCMA-X 0.2 (same
+ *  results; random = u24 * 2^-24). */
 OMC_HD float f16_bits_to_f32(uint32_t h) {
 #if defined(OMC_ON_DEVICE)
     return __half2float(__ushort_as_half((unsigned short)h));
@@ -488,14 +554,10 @@ OMC_HD float f16_bits_to_f32(uint32_t h) {
     return dec_f32<FmtF16>(h);
 #endif
 }
-
-/** FP16 target, as HiCMA-X 0.2 (including its round-to-nearest through FP32
- *  above 65504), in branch-free form. */
-OMC_HD uint32_t sr_f16(double value, float random, bool sat) {
+OMC_HD uint32_t sr_f16_fp(double value, uint32_t u24, bool sat) {
+    const float random = (float)(int32_t)u24 * (1.0f / 16777216.0f);
     const double a = fabs(value);
     const uint32_t sign = (value < 0.0) ? 0x8000u : 0u;
-    /* largest half <= a: truncate a to 11 significant bits, or count steps of
-     * 2^-24 below 2^-14 */
     const uint64_t b = d2u(a);
     const uint32_t lo_n = ((uint32_t)(((int)(b >> 52) - 1023 + 15) & 31) << 10) | (uint32_t)((b >> 42) & 0x3ffu);
     const double as = (a < 6.103515625e-05) ? a : 0.0;
@@ -508,54 +570,42 @@ OMC_HD uint32_t sr_f16(double value, float random, bool sat) {
     const double p_lower = div_pow2(uv - a, uv - lv);
     uint32_t r = ((random < p_lower) ? lo : up) | sign;
     r = (lv == a) ? (lo | sign) : r;
-    r = (top & (lv != a)) ? enc_f32<FmtF16>((float)value, sat) : r;   /* above the largest half */
+    r = (top & (lv != a)) ? enc_f32<FmtF16>((float)value, sat) : r;
     r = (value != value) ? (0x7e00u | (uint32_t)((d2u(value) >> 48) & 0x8000u)) : r;
     return r;
 }
-
-/** Other small formats: the same rule, round to nearest above the largest
- *  finite value. */
-template <class F>
-OMC_HD uint32_t sr_small(double value, float random, bool sat) {
-    if (value != value) return F::nancode;
-    const double a = fabs(value);
-    const uint32_t sign = (value < 0.0) ? F::signbit : 0u;
-    /* lower = largest representable <= a, via FP32 round toward zero */
-    const float maxf = dec_f32<F>(F::maxcode);
-    if (a >= (double)maxf) {
-        if (a == (double)maxf) return F::maxcode | sign;
-        return enc_f32<F>(f64_to_f32_ro(value), sat);
-    }
-    float fa = f64_to_f32_ro(a);                  /* odd rounding keeps the order with codes */
-    uint32_t lo = enc_f32<F>(fa, false);          /* nearest: lo or lo + 1 */
-    double lv = (double)dec_f32<F>(lo);
-    if (lv > a) { lo -= 1u; lv = (double)dec_f32<F>(lo); }
-    if (lv == a) return lo | sign;
-    const uint32_t up = lo + 1u;
-    const double uv = (double)dec_f32<F>(up);
-    const double p_lower = (uv - a) / (uv - lv);
-    return ((random < p_lower) ? lo : up) | sign;
-}
-
-/** Stochastic rounding of one element at position (i, j). */
-template <class D, class S> struct SR;
-template <class S> struct SR<float, S> {
-    OMC_HD static float go(S s, uint32_t i, uint32_t j, uint64_t seed, const ElemOpts &o) {
-        const double v = (double)Src<S>::get(s);
-        float r = sr_f32(v, sr_u01(i, j, seed, sr_bits(s)));
-        return Enc<float>::from_f32(r, o);   /* saturation of +-Inf */
-    }
-};
 template <class S> struct SR<f16, S> {
     OMC_HD static f16 go(S s, uint32_t i, uint32_t j, uint64_t seed, const ElemOpts &o) {
-        const double v = (double)Src<S>::get(s);
-        return make<f16>(sr_f16(v, sr_u01(i, j, seed, sr_bits(s)), o.sat));
+#if defined(OMC_ON_DEVICE)
+        if constexpr (sizeof(S) == 8)
+            return make<f16>(sr_f16_fp((double)s, sr_u24(i, j, seed, sr_bits(s)), o.sat));
+#endif
+        using A = SrAbs<S>;
+        const auto x = A::val(s);
+        const double a = fabs((double)x);
+        const uint32_t sign = (x < 0) ? 0x8000u : 0u;     /* as HiCMA-X 0.2: -0 gives +0 */
+        const uint32_t u = sr_u24(i, j, seed, sr_bits(s));
+        uint32_t r = sr_code<typename A::U, A::MS, A::BS, 10, 15>(A::bits(s), u) | sign;
+        /* as HiCMA-X 0.2: above 65504 round to nearest through FP32 */
+        r = (a > 65504.0) ? enc_f32<FmtF16>((float)x, o.sat) : r;
+        r = (x != x) ? (0x7e00u | (A::neg(s) ? 0x8000u : 0u)) : r;
+        return make<f16>(r);
     }
 };
 template <class D, class S> struct SRSmall {
     OMC_HD static D go(S s, uint32_t i, uint32_t j, uint64_t seed, const ElemOpts &o) {
-        const double v = (double)Src<S>::get(s);
-        return make<D>(sr_small<typename Traits<D>::F>(v, sr_u01(i, j, seed, sr_bits(s)), o.sat));
+        using F = typename Traits<D>::F;
+        using A = SrAbs<S>;
+        const auto x = A::val(s);
+        const double a = fabs((double)x);
+        const uint32_t sign = (x < 0) ? F::signbit : 0u;  /* -0 gives +0, as for FP16 */
+        const uint32_t u = sr_u24(i, j, seed, sr_bits(s));
+        uint32_t r = sr_code<typename A::U, A::MS, A::BS, F::kM, F::bias>(A::bits(s), u) | sign;
+        /* above the largest finite value: round to nearest (from the exact value) */
+        const double maxf = (double)dec_f32<F>(F::maxcode);
+        r = (a > maxf) ? enc_f32<F>(f64_to_f32_ro((double)x), o.sat) : r;
+        r = (x != x) ? F::nancode : r;
+        return make<D>(r);
     }
 };
 template <class S> struct SR<bf16, S> : SRSmall<bf16, S> {};
@@ -579,10 +629,22 @@ OMC_SR_OK(e5m2, double); OMC_SR_OK(e5m2, float); OMC_SR_OK(e5m2, f16); OMC_SR_OK
 
 /** cvt<D>(s * scale), the product in FP64 for FP64 and 32/64-bit integer
  *  sources, in FP32 otherwise. */
+/** The product rounded to X. On gfx9 the AMDGPU backend fuses an FP32
+ *  multiply and the FP16 conversion that follows into one v_mad_mix, which
+ *  rounds once, even with -ffp-contract=off; an empty asm keeps the product. */
+template <class X>
+OMC_HD X scaled_product(X a, X b) {
+    X x = a * b;
+#if defined(__HIP_DEVICE_COMPILE__)
+    asm volatile("" : "+v"(x));
+#endif
+    return x;
+}
+
 template <class D, class S>
 OMC_HD D cvt_scaled(S s, float scale, const ElemOpts &o) {
     using X = typename Src<S>::T;
-    const X x = Src<S>::get(s) * (X)scale;
+    const X x = scaled_product<X>(Src<S>::get(s), (X)scale);
     return EncFrom<D, X>::go(x, o);
 }
 
@@ -591,7 +653,7 @@ OMC_HD D cvt_scaled(S s, float scale, const ElemOpts &o) {
 template <class D, class S>
 OMC_HD D sr_scaled(S s, float scale, uint32_t i, uint32_t j, uint64_t seed, const ElemOpts &o) {
     using X = typename Src<S>::T;
-    const X x = Src<S>::get(s) * (X)scale;
+    const X x = scaled_product<X>(Src<S>::get(s), (X)scale);
     return SR<D, X>::go(x, i, j, seed, o);
 }
 
