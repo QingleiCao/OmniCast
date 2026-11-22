@@ -5,6 +5,10 @@
  * hicma_parsec_datatype_convert.c), used to check bit compatibility. The FP16
  * stochastic rounding was CUDA code; here it runs on the host with the
  * HiCMA-X ISPC half helpers and an independent round-toward-zero.
+ *
+ * HiCMA-X code: Copyright (c) 2023-2025 SLU, MIT, Nvidia; 2018-2025 KAUST;
+ * 2018-2023 The University of Tennessee and The University of Tennessee Research
+ * Foundation. BSD 3-Clause; see the section "Code from HiCMA-X" in LICENSE.
  */
 #ifndef LEGACY_HICMA_SR_H
 #define LEGACY_HICMA_SR_H

@@ -1,6 +1,10 @@
 /* HiCMA-X 0.2 CPU conversion loops (hicma_parsec_datatype_convert.c,
  * hicma_parsec_stochastic_rounding.c), verbatim, compiled like HiCMA-X
- * (C, -O3, no -march) as the baseline of the CPU benchmark. */
+ * (C, -O3, no -march) as the baseline of the CPU benchmark.
+ *
+ * HiCMA-X code: Copyright (c) 2023-2025 SLU, MIT, Nvidia; 2018-2025 KAUST;
+ * 2018-2023 The University of Tennessee and The University of Tennessee Research
+ * Foundation. BSD 3-Clause; see the section "Code from HiCMA-X" in LICENSE. */
 #include <stdint.h>
 #include <string.h>
 #include <math.h>

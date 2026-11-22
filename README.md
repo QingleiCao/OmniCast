@@ -120,3 +120,9 @@ nothing else runs on the GPU, and slower beside kernels of other streams
 `docs/REPORT.md` is the full report (design, profiling, performance);
 `docs/DESIGN.md` has the design details and `docs/PERFORMANCE.md` the
 measurement tables.
+
+## License
+
+BSD 3-Clause, see [`LICENSE`](LICENSE). The HiCMA-X 0.2 conversions that the
+tests and benchmarks compare against are HiCMA-X code and keep its copyright
+notice (same license).

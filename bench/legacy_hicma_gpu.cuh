@@ -4,6 +4,10 @@
  * (src/core/hicma_parsec.cu, hicma_parsec_stochastic_rounding.cu), kept
  * verbatim in substance as the baseline of the GPU benchmark: 32x32 thread
  * blocks, one element per thread; FP8 written transposed one byte per thread.
+ *
+ * HiCMA-X code: Copyright (c) 2023-2025 SLU, MIT, Nvidia; 2018-2025 KAUST;
+ * 2018-2023 The University of Tennessee and The University of Tennessee Research
+ * Foundation. BSD 3-Clause; see the section "Code from HiCMA-X" in LICENSE.
  */
 #ifndef LEGACY_HICMA_GPU_CUH
 #define LEGACY_HICMA_GPU_CUH

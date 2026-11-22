@@ -1,0 +1,48 @@
+BSD 3-Clause License
+
+Copyright (c) 2026, Qinglei Cao
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+-------------------------------------------------------------------------------
+Code from HiCMA-X
+
+The reference copies of the HiCMA-X 0.2 conversions used by the tests and the
+benchmarks (tests/legacy_hicma_sr.h, bench/legacy_hicma_cpu.c,
+bench/legacy_hicma_gpu.cuh) come from HiCMA-X (https://github.com/ecrc/hicma-x)
+and are distributed under the same BSD 3-Clause conditions as above, with
+HiCMA-X's copyright notice:
+
+Copyright (c) 2023-2025     Saint Louis University (SLU)
+Copyright (c) 2023-2025     Massachusetts Institute of Technology (MIT)
+Copyright (c) 2023-2025     Nvidia Corporation
+Copyright (c) 2018-2025     King Abdullah University of Science and Technology (KAUST)
+Copyright (c) 2018-2023     The University of Tennessee and The University
+                            of Tennessee Research Foundation
+All rights reserved.
+
+They are not part of the OmniCast library.

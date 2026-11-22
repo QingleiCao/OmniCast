@@ -169,6 +169,7 @@ if(OMNICAST_INSTALL)
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(FILES include/omnicast/omnicast.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/omnicast)
+    install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
     install(EXPORT OmniCastTargets NAMESPACE OmniCast::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OmniCast)
     configure_package_config_file(cmake/OmniCastConfig.cmake.in
