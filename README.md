@@ -6,9 +6,10 @@ one C API.
 | | |
 |---|---|
 | Types | FP64, FP32, FP16, BF16, FP8 E4M3 / E5M2 (OCP), signed and unsigned 8/16/32/64-bit integers — every pair |
-| Layouts | contiguous arrays; column-major matrices with leading dimensions; transposed output; zero-padded output; in place |
+| Layouts | contiguous arrays; column-major matrices with leading dimensions; transposed output; zero-padded output |
+| Modes | every conversion with every option out of place **and in place** (single pass, also for strided matrices on the GPU), on the CPU, CUDA and HIP |
 | Rounding | nearest even (bit-identical to the CUDA conversion intrinsics); stochastic rounding (reproducible, independent of the thread decomposition); truncation for integers |
-| Extras | saturation, scaling by a host or device factor, dynamic power-of-two scaling from the amax (the FP8 recipe), amax |
+| Extras | saturation, scaling by a host or device factor, dynamic power-of-two scaling from the amax (the FP8 recipe, also into integers), stochastic rounding of scaled values, amax |
 | CPU | AVX-512, AVX2+F16C, NEON, generic — chosen at run time |
 | GPU | CUDA (sm_70 and later) and HIP (gfx9 and later) from one source; asynchronous on a stream |
 
@@ -27,10 +28,12 @@ against it for every type pair.
 omc_convert(OMC_FP64, x, OMC_FP16, h, n, NULL);                     /* 1-D */
 omc_convert_2d(OMC_FP32, A, lda, OMC_BF16, B, ldb, m, n, NULL);     /* matrix */
 omc_convert_inplace(OMC_FP64, OMC_FP32, buf, n, NULL);              /* in place */
+omc_convert(OMC_FP64, buf, OMC_FP32, buf, n, NULL);                  /* the same: dst == src */
 
 /* GPU: device pointers, asynchronous on the stream */
 omc_gpu_convert_2d(OMC_FP64, dA, lda, OMC_FP16, dB, ldb, m, n, NULL, stream);
 omc_gpu_convert_inplace(OMC_FP32, OMC_FP16, dC, n, NULL, stream);   /* one pass, no copy */
+omc_gpu_convert_inplace_2d(OMC_FP64, OMC_FP16, dT, ld, m, n, NULL, stream);  /* any ld >= m */
 
 /* options: a zero-initialized struct (or NULL) means the defaults */
 omc_options_t o = { .rounding = OMC_ROUND_STOCHASTIC, .seed = 42 };
@@ -60,7 +63,11 @@ All functions return an `omc_status_t`. The full reference is in
   x. Results are reproducible and identical on the CPU, CUDA and HIP. FP64 → FP32
   and FP64/FP32 → FP16 are bit-compatible with HiCMA-X 0.2.
 - Scaling multiplies in the source's precision (FP64 for FP64 and 32/64-bit
-  integer sources, FP32 otherwise) before the conversion.
+  integer sources, FP32 otherwise) and rounds the product before the
+  conversion, on every backend.
+- In place: the `_inplace` functions, or `dst == src`. Without transposition
+  or padding it is a single pass with no allocation; transposed or padded
+  results go through a temporary and a copy back.
 
 ## Build
 
@@ -102,4 +109,6 @@ forces a CPU code path.
   the host; 2-D, transposed, padded, in place (including 4 concurrent streams),
   stochastic rounding against the HiCMA-X implementation, scaling.
 
-`docs/DESIGN.md` has the details and `docs/PERFORMANCE.md` the measurements.
+`docs/REPORT.md` is the full report (design, profiling, performance);
+`docs/DESIGN.md` has the design details and `docs/PERFORMANCE.md` the
+measurement tables.

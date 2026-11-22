@@ -38,7 +38,7 @@ def gpu():
     open('summary_gpu.md', 'w').write('\n'.join(out) + '\n')
 def cpu():
     files = [('Skylake-SP AVX-512', 'cpu_skylake_avx512.txt'), ('Skylake-SP AVX2 path', 'cpu_skylake_avx2.txt'),
-             ('Zen 2 AVX2', 'cpu_epyc7302_avx2.txt'), ('Broadwell AVX2', 'cpu_broadwell_avx2.txt')]
+             ('Zen 2 AVX2', 'cpu_zen2_avx2.txt'), ('Broadwell AVX2', 'cpu_broadwell_avx2.txt')]
     keys = ['fp64>fp32', 'fp32>fp64', 'fp32>fp16', 'fp16>fp32', 'fp64>fp16', 'fp32>bf16', 'fp64>bf16', 'fp32>e4m3', 'e4m3>fp32',
             'fp64>e4m3', 'fp32>int8', 'int8>fp32', 'fp64>int32', 'SR:fp64>fp32', 'SR:fp64>fp16', 'IP:fp64>fp32', 'IP:fp32>fp64']
     out = []

@@ -1,9 +1,10 @@
-# OmniCast 2 performance
+# OmniCast 2 performance tables
 
-All numbers measured on 2026-11-21 with the code of this branch. Raw outputs
-are in [`../results`](../results): `gpu_*.txt` (`bench/bench_gpu.cu`),
-`cpu_*.txt` (`bench/bench_cpu.cpp`), `test_*.txt`; the tables below are made by
-`results/make_summaries.py`.
+The comparison with the code OmniCast replaced in HiCMA-X 0.2, regenerated
+on 2026-11-22 from the files in [`../results`](../results) by
+`results/make_summaries.py`. [`REPORT.md`](REPORT.md) has the design, the
+profiling, the in-place / out-of-place measurements for every pair and the
+before/after tables of the optimizations.
 
 ## Method
 
@@ -20,11 +21,11 @@ are in [`../results`](../results): `gpu_*.txt` (`bench/bench_gpu.cu`),
 - **CPU** (`omnicast_bench_cpu`): one thread, best of 7 runs each ≥ 20 ms;
   GB/s counts bytes read + written. Baseline: the HiCMA-X 0.2 loops
   (`bench/legacy_hicma_cpu.c`, compiled like HiCMA-X: C, `-O3`, no `-march`).
-- Machines: A100-PCIe-40GB + Xeon Gold 6140 (methane), H100-PCIe (hexane),
-  V100-SXM2-32GB + Xeon E5-2698 v4 (leconte), Radeon VII (gfx906) + EPYC 7302
-  (histamine2); CUDA 12.6, ROCm 6.4.3, GCC 11.5. The H100 numbers are from the
-  build before the last change to the stochastic-rounding random number (an
-  exact int32 conversion for AVX2); plain conversions are unaffected.
+- Machines: H100-PCIe (hexane), V100-SXM2-32GB + Xeon E5-2698 v4 (leconte),
+  Radeon VII (gfx906) + EPYC 7302 (histamine2/3), Xeon Gold 6140 (methane);
+  CUDA 12.6, ROCm 6.4.3, GCC 11.5. The A100-PCIe-40GB (methane) table is from
+  2026-11-21 (the first round): the A100 was busy with another user's job
+  during this round.
 
 ## GPU
 
@@ -42,53 +43,31 @@ are in [`../results`](../results): `gpu_*.txt` (`bench/bench_gpu.cu`),
 
 | category | nb=1024 | nb=2048 | nb=4096 | nb=8192 | % of copy |
 |---|---|---|---|---|---|
-| plain (FP64/FP32/FP16/BF16) | 1.11x (0.96–1.26) | 1.40x (1.09–2.05) | 1.26x (1.08–1.48) | 1.31x (1.10–1.57) | 96% |
-| stochastic rounding | 1.02x (0.91–1.16) | 1.21x (1.18–1.24) | 1.25x (1.17–1.36) | 1.28x (1.18–1.43) | 74% |
-| FP8 transposed | 3.28x (3.13–3.37) | 5.26x (4.15–5.94) | 4.74x (3.62–5.77) | 4.74x (3.56–5.80) | 75% |
-| FP8 transposed + dynamic scale | 2.12x (2.03–2.22) | 3.45x (2.96–4.01) | 3.04x (2.49–3.71) | 3.04x (2.46–3.76) | 48% |
-| in place | 1.30x (1.22–1.39) | 2.39x (2.02–3.20) | 2.32x (1.79–3.08) | 2.32x (1.79–2.99) | 90% |
+| plain (FP64/FP32/FP16/BF16) | 1.10x (0.96–1.27) | 1.40x (1.09–2.08) | 1.26x (1.08–1.48) | 1.31x (1.10–1.57) | 96% |
+| stochastic rounding | 1.08x (1.01–1.17) | 1.22x (1.19–1.26) | 1.31x (1.26–1.42) | 1.29x (1.17–1.48) | 72% |
+| FP8 transposed | 3.96x (3.74–4.11) | 5.47x (4.23–6.24) | 5.14x (3.72–6.41) | 5.09x (3.67–6.34) | 82% |
+| FP8 transposed + dynamic scale | 2.29x (2.19–2.40) | 3.51x (3.00–4.11) | 3.12x (2.51–3.88) | 3.17x (2.52–3.98) | 49% |
+| in place | 1.44x (1.34–1.59) | 2.78x (2.42–3.55) | 2.33x (1.87–2.98) | 2.34x (1.88–2.95) | 91% |
 
 **V100-SXM2-32GB** — geometric-mean speedup over the HiCMA-X 0.2 kernels (min–max); last column: median % of a device copy of the same bytes at nb=8192
 
 | category | nb=1024 | nb=2048 | nb=4096 | nb=8192 | % of copy |
 |---|---|---|---|---|---|
-| plain (FP64/FP32/FP16/BF16) | 1.17x (0.97–1.45) | 1.07x (0.99–1.19) | 1.12x (0.98–1.35) | 1.13x (0.98–1.35) | 94% |
-| stochastic rounding | 1.01x (0.96–1.08) | 1.15x (1.10–1.19) | 1.25x (1.15–1.37) | 1.28x (1.17–1.43) | 91% |
-| FP8 transposed | 3.93x (2.15–5.35) | 3.77x (2.88–4.80) | 3.94x (2.45–5.87) | 4.10x (2.71–5.77) | 72% |
-| FP8 transposed + dynamic scale | 2.58x (2.01–3.32) | 2.51x (2.13–2.96) | 2.52x (1.97–3.22) | 2.61x (2.07–3.30) | 47% |
-| in place | 2.05x (1.53–2.85) | 1.87x (1.50–2.28) | 1.98x (1.57–2.48) | 2.01x (1.65–2.45) | 92% |
+| plain (FP64/FP32/FP16/BF16) | 1.17x (0.97–1.47) | 1.07x (0.99–1.19) | 1.12x (0.98–1.35) | 1.13x (0.98–1.34) | 94% |
+| stochastic rounding | 1.03x (1.00–1.08) | 1.18x (1.16–1.20) | 1.25x (1.15–1.38) | 1.27x (1.16–1.41) | 91% |
+| FP8 transposed | 4.49x (2.51–6.07) | 4.49x (2.91–6.37) | 4.58x (2.75–7.17) | 4.78x (2.81–7.40) | 81% |
+| FP8 transposed + dynamic scale | 2.69x (2.08–3.49) | 2.60x (2.11–3.21) | 2.66x (2.08–3.40) | 2.77x (2.11–3.63) | 50% |
+| in place | 2.04x (1.44–2.96) | 1.85x (1.49–2.27) | 1.97x (1.55–2.48) | 1.99x (1.62–2.46) | 92% |
 
 **Radeon VII (gfx906)** — geometric-mean speedup over the HiCMA-X 0.2 kernels (min–max); last column: median % of a device copy of the same bytes at nb=8192
 
 | category | nb=1024 | nb=2048 | nb=4096 | nb=8192 | % of copy |
 |---|---|---|---|---|---|
-| plain (FP64/FP32/FP16/BF16) | 1.27x (1.08–1.51) | 1.15x (0.98–1.55) | 1.12x (0.97–1.51) | 1.18x (0.99–1.51) | 96% |
-| stochastic rounding | 1.24x (1.15–1.29) | 1.23x (1.15–1.27) | 1.21x (1.12–1.27) | 1.21x (1.13–1.26) | 54% |
-| FP8 transposed | – | – | – | – | 83% |
-| FP8 transposed + dynamic scale | – | – | – | – | 45% |
-| in place | 2.00x (1.22–2.92) | 2.45x (1.88–3.34) | 2.44x (1.87–3.16) | 2.51x (1.92–3.14) | 102% |
-
-Notes:
-
-- Plain conversions run at 94–97 % of a copy of the same bytes for large tiles
-  on NVIDIA and 96 % on the Radeon VII. The HiCMA-X kernels were already close
-  on large tiles of FP64 sources; the gains are largest for 2- and 4-byte
-  sources (FP32 → FP16 2.1× at nb = 2048 on A100 and H100) and on the H100.
-- FP8: the HiCMA-X converters wrote the transposed (cuBLASLt TN) operand one
-  byte per thread at a stride of ld; OmniCast's 64 × 64 shared tile with packed
-  4-byte stores is 3–6× faster. With the per-tile power-of-two scale, OmniCast
-  needs two kernels (amax with a last-block finish, then the scaled
-  conversion) against four operations, 2–4× faster.
-- In place: one kernel that reads and writes each byte once (12 bytes per
-  element for FP64 → FP32) instead of a conversion into a scratch tile plus a
-  copy back (20 bytes): 1.6–3.3× on large tiles.
-- Stochastic rounding is compute-heavy (two SplitMix64 hashes and a few FP64
-  operations per element); the branch-free form and the exact reciprocal of the
-  power-of-two step make it 1.2–1.45× faster for nb ≥ 2048, and it reaches
-  74–91 % of a copy on the NVIDIA GPUs.
-- At nb = 1024 (≤ 8 MB, L2-resident on A100/H100) launch latency dominates;
-  OmniCast is 0.94–1.2× of HiCMA-X there for plain conversions and
-  stochastic rounding, and still well ahead for FP8 and in place.
+| plain (FP64/FP32/FP16/BF16) | 1.08x (0.88–1.38) | 1.15x (0.97–1.48) | 1.17x (0.97–1.54) | 1.24x (0.99–1.57) | 100% |
+| stochastic rounding | 1.15x (1.03–1.35) | 1.30x (1.15–1.57) | 1.36x (1.20–1.65) | 1.38x (1.23–1.67) | 54% |
+| FP8 transposed | – | – | – | – | 79% |
+| FP8 transposed + dynamic scale | – | – | – | – | 47% |
+| in place | 1.85x (1.20–3.06) | 1.83x (1.40–2.26) | 2.20x (1.67–2.79) | 2.45x (1.87–2.98) | 98% |
 
 ## CPU
 
@@ -96,59 +75,45 @@ One core, 256K elements (cache-resident): GB/s counting bytes read + written; in
 
 | pair | Skylake-SP AVX-512 | Skylake-SP AVX2 path | Zen 2 AVX2 | Broadwell AVX2 |
 |---|---|---|---|---|
-| fp64>fp32 | 26.6 (1.00x) | 26.4 (1.00x) | 53.1 (1.39x) | 29.9 (1.06x) |
-| fp32>fp64 | 25.9 (0.97x) | 26.2 (0.99x) | 33.9 (0.97x) | 24.7 (1.00x) |
-| fp32>fp16 | 27.8 | 30.9 | 39.2 | 30.3 |
-| fp16>fp32 | 29.4 | 29.1 | 37.8 | 25.1 |
-| fp64>fp16 | 26.6 | 15.9 | 9.5 | 14.7 |
-| fp32>bf16 | 27.9 | 19.9 | 15.9 | 18.0 |
-| fp64>bf16 | 23.0 | 11.6 | 7.0 | 11.0 |
-| fp32>e4m3 | 14.9 | 6.7 | 4.1 | 6.4 |
-| e4m3>fp32 | 30.3 | 20.8 | 8.0 | 14.4 |
-| fp64>e4m3 | 14.7 | 6.8 | 3.9 | 6.4 |
-| fp32>int8 | 22.5 (0.71x) | 28.6 (0.91x) | 28.3 (1.12x) | 27.5 (0.97x) |
-| int8>fp32 | 33.0 (3.61x) | 32.9 (3.59x) | 26.0 (4.03x) | 23.2 (2.27x) |
-| fp64>int32 | 25.6 (0.96x) | 25.3 (0.96x) | 32.9 (0.89x) | 26.2 (0.92x) |
-| SR:fp64>fp32 | 6.3 (9.34x) | 2.5 (3.73x) | 1.7 (3.68x) | 2.1 (3.23x) |
-| SR:fp64>fp16 | 3.9 | 1.5 | 0.9 | 1.2 |
-| IP:fp64>fp32 | 35.2 (1.01x) | 35.0 (1.02x) | 36.5 (0.98x) | 30.9 (1.05x) |
-| IP:fp32>fp64 | 33.4 (1.19x) | 32.7 (1.18x) | 30.9 (1.70x) | 25.4 (1.09x) |
+| fp64>fp32 | 25.8 (1.00x) | 26.3 (1.00x) | 69.9 (1.06x) | 31.3 (1.05x) |
+| fp32>fp64 | 24.1 (0.93x) | 26.1 (1.04x) | 60.0 (0.94x) | 25.9 (1.01x) |
+| fp32>fp16 | 23.3 | 30.3 | 73.5 | 31.3 |
+| fp16>fp32 | 25.5 | 28.6 | 69.0 | 25.9 |
+| fp64>fp16 | 23.2 | 15.2 | 15.3 | 14.7 |
+| fp32>bf16 | 24.2 | 15.9 | 27.3 | 18.3 |
+| fp64>bf16 | 21.2 | 11.0 | 11.6 | 11.2 |
+| fp32>e4m3 | 13.7 | 6.5 | 7.8 | 6.4 |
+| e4m3>fp32 | 26.1 | 20.0 | 12.8 | 14.5 |
+| fp64>e4m3 | 11.6 | 6.3 | 7.1 | 6.5 |
+| fp32>int8 | 25.3 (0.88x) | 27.3 (0.88x) | 50.5 (1.12x) | 28.2 (0.95x) |
+| int8>fp32 | 26.7 (3.24x) | 30.3 (3.56x) | 43.0 (4.09x) | 24.0 (2.35x) |
+| fp64>int32 | 23.6 (0.92x) | 26.7 (0.98x) | 57.4 (0.84x) | 27.1 (0.91x) |
+| SR:fp64>fp32 | 5.2 (9.91x) | 2.5 (3.78x) | 2.8 (4.81x) | 2.1 (3.22x) |
+| SR:fp64>fp16 | 4.9 | 1.7 | 1.9 | 1.4 |
+| IP:fp64>fp32 | 32.8 (1.01x) | 35.3 (1.02x) | 72.3 (1.01x) | 32.0 (1.05x) |
+| IP:fp32>fp64 | 29.0 (1.48x) | 33.2 (1.54x) | 60.0 (3.07x) | 26.2 (1.10x) |
 
 One core, 32768K elements (DRAM): GB/s counting bytes read + written; in brackets the speedup over the HiCMA-X 0.2 loop where HiCMA-X had one (it had no x86 FP16/BF16/FP8 conversion).
 
 | pair | Skylake-SP AVX-512 | Skylake-SP AVX2 path | Zen 2 AVX2 | Broadwell AVX2 |
 |---|---|---|---|---|
-| fp64>fp32 | 13.4 (1.04x) | 13.0 (1.01x) | 10.7 (0.98x) | 11.5 (0.99x) |
-| fp32>fp64 | 10.5 (0.86x) | 11.5 (0.93x) | 8.4 (0.95x) | 10.0 (1.01x) |
-| fp32>fp16 | 10.6 | 13.2 | 10.7 | 11.4 |
-| fp16>fp32 | 10.9 | 11.1 | 9.4 | 10.0 |
-| fp64>fp16 | 12.8 | 10.5 | 8.0 | 10.3 |
-| fp32>bf16 | 12.5 | 11.4 | 10.0 | 10.0 |
-| fp64>bf16 | 10.6 | 8.1 | 5.9 | 7.9 |
-| fp32>e4m3 | 10.3 | 6.0 | 5.5 | 5.7 |
-| e4m3>fp32 | 11.6 | 11.1 | 8.2 | 7.7 |
-| fp64>e4m3 | 8.4 | 5.3 | 4.3 | 5.2 |
-| fp32>int8 | 12.3 (0.95x) | 12.2 (0.93x) | 11.2 (1.00x) | 11.8 (1.00x) |
-| int8>fp32 | 9.7 (1.24x) | 10.5 (1.33x) | 8.2 (1.34x) | 9.5 (1.05x) |
-| fp64>int32 | 11.9 (0.93x) | 12.3 (0.97x) | 12.0 (1.11x) | 11.8 (1.01x) |
-| SR:fp64>fp32 | 5.7 (8.56x) | 2.5 (3.67x) | 1.7 (3.64x) | 2.1 (3.22x) |
-| SR:fp64>fp16 | 3.7 | 1.5 | 0.9 | 1.1 |
-| IP:fp64>fp32 | 13.9 (1.05x) | 13.6 (1.02x) | 11.9 (1.10x) | 11.8 (0.99x) |
-| IP:fp32>fp64 | 11.0 (0.89x) | 12.0 (0.97x) | 10.6 (0.85x) | 10.3 (0.99x) |
-
-Notes:
-
-- FP16/BF16/FP8 conversions did not exist on x86 in HiCMA-X (only on Fugaku).
-- FP64 ↔ FP32 are at the memory roofline in both; OmniCast's FP64 → FP16/BF16
-  /FP8 are correctly rounded (one rounding) and vectorized.
-- Stochastic rounding (FP64 → FP32, the HiCMA-X CPU case) is 8.5–9.4× faster
-  with AVX-512 and 3.2–3.8× with AVX2, with identical bits.
-- Float → integer saturates and maps NaN to 0 (the HiCMA-X loops were plain C
-  casts, undefined out of range); with AVX2 that is now within 0.9–1.0× of the
-  plain cast thanks to clamp + `cvtt` + saturating packs.
-- In place: blocks through an L1 buffer only for the first 1024 elements, then
-  geometrically growing chunks converted directly: within 0.9–1.18× of the
-  HiCMA-X loops.
+| fp64>fp32 | 12.9 (1.03x) | 13.3 (1.01x) | 21.7 (1.07x) | 11.8 (0.98x) |
+| fp32>fp64 | 10.0 (0.86x) | 11.7 (0.93x) | 18.8 (1.13x) | 16.5 (1.65x) |
+| fp32>fp16 | 10.4 | 13.5 | 21.4 | 11.7 |
+| fp16>fp32 | 10.0 | 11.3 | 20.0 | 18.1 |
+| fp64>fp16 | 11.7 | 10.7 | 13.1 | 10.3 |
+| fp32>bf16 | 12.5 | 11.8 | 16.1 | 10.2 |
+| fp64>bf16 | 10.7 | 8.3 | 10.6 | 8.0 |
+| fp32>e4m3 | 10.4 | 6.2 | 7.5 | 5.7 |
+| e4m3>fp32 | 11.7 | 11.3 | 11.6 | 7.8 |
+| fp64>e4m3 | 6.0 | 5.5 | 6.6 | 5.3 |
+| fp32>int8 | 11.7 (0.90x) | 11.7 (0.90x) | 17.6 (0.99x) | 11.9 (1.00x) |
+| int8>fp32 | 9.6 (1.27x) | 10.9 (1.35x) | 15.4 (1.64x) | 9.7 (1.07x) |
+| fp64>int32 | 12.4 (0.95x) | 12.6 (0.96x) | 18.6 (0.92x) | 12.0 (1.01x) |
+| SR:fp64>fp32 | 5.3 (8.52x) | 2.4 (3.68x) | 2.8 (4.75x) | 2.1 (3.20x) |
+| SR:fp64>fp16 | 4.5 | 1.7 | 1.9 | 1.4 |
+| IP:fp64>fp32 | 14.1 (1.04x) | 13.6 (1.01x) | 21.6 (1.07x) | 12.0 (0.99x) |
+| IP:fp32>fp64 | 10.3 (0.85x) | 12.0 (0.98x) | 16.8 (1.34x) | 10.4 (0.99x) |
 
 ### LAPACKE dlag2s / slag2d (MKL 2024.2) against OmniCast, one thread
 
@@ -179,22 +144,8 @@ baseline/OmniCast runs:
   (band, adaptive, runtime decisions) show no measurable difference: their
   intervals contain zero, with up to 40 % between the fastest and the slowest run of one binary.
 
-## Profiling findings that shaped the code
+## Profiling
 
-1. **GCC does not vectorize branch-free selects under `-ftrapping-math`** (the
-   default). With `-fno-trapping-math` (FP exception flags only; results
-   unchanged) the generic FP8 encoders went from 1.5 to 0.33 ns per element,
-   stochastic rounding from 15 to 2 ns.
-2. **A runtime flag inside a loop body blocks vectorization**: saturation and
-   rounding mode are template parameters of the loops.
-3. **AVX2 has no vector uint64 → float convert**: the 24-bit random number
-   of stochastic rounding is converted through int32 (exact), which let the
-   whole AVX2 loop vectorize (0.8 → 2.5 GB/s).
-4. **NVVM merged the vector store with the scalar fallback store** to the same
-   address and kept the fallback's alignment (two `st.global.u32` per vector);
-   Nsight showed FP64 → FP32 at 9.4 µs vs 5.1 µs for FP64 → FP16. Inline PTX
-   `st.global.v2/v4` fixed it (→ 5.5 µs).
-5. **Striped vector rounds** (each warp instruction one contiguous range on
-   both sides) instead of each thread owning 64 contiguous bytes: widening
-   conversions on small tiles went from 0.48× to 1.0× of HiCMA-X.
-6. **First-case artifacts**: GPU clocks need ~0.5 s of load before timing.
+See [`REPORT.md`](REPORT.md), section 3: Nsight Compute on the A100, H100 and
+V100, rocprofv3 on the Radeon VII, `perf` on Skylake-SP, and the measured
+variants behind every kernel parameter.
