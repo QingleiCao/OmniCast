@@ -10,9 +10,9 @@ number below comes from a file there or under `results/profiling/`.
 Platforms: H100 PCIe (hexane), V100-SXM2-32GB and Xeon E5-2698 v4 Broadwell
 (leconte), Radeon VII gfx906 and EPYC 7302 Zen 2 (histamine2, histamine3), A100-PCIe-40GB
 and Xeon Gold 6140 Skylake-SP (methane). CUDA 12.6, ROCm 6.4.3, GCC 11.5.
-The A100 was taken by another user's job (39 GB, 100 % utilization) during
-this round, so its numbers are from the first round (2026-11-21) and its
-Nsight Compute sweep describes the code before this round.
+The A100 was taken by another user's job for most of this round. Its tests,
+benchmarks and Nsight Compute sweep were run on the final build at the end;
+its kernel-by-kernel before/after comparison (section 4.3) was not.
 
 ## Summary
 
@@ -21,8 +21,8 @@ Nsight Compute sweep describes the code before this round.
   AVX-512) and on CUDA and HIP. That is 15288 calls per mode on each backend,
   and every one gave the status and the bits of the reference. Section 1.
 - **Large GPU tiles run at copy speed.** At 8192², the median pair reaches
-  94–101 % of a device copy of the same bytes out of place and 90–97 % in
-  place, on the H100, the V100 and the Radeon VII. In place costs a median
+  93–101 % of a device copy of the same bytes out of place and 88–97 % in
+  place, on the H100, the A100, the V100 and the Radeon VII. In place costs a median
   2–5 % more time than out of place.
 - **Against the HiCMA-X 0.2 kernels, 8192² tiles, same output bytes** (H100,
   V100, Radeon VII; the HiCMA-X HIP code had no FP8 kernels):
@@ -105,7 +105,7 @@ bits (NaN payloads aside):
 | backend | out of place | in place | dst == src |
 |---|---|---|---|
 | host generic, AVX2, AVX-512 (Skylake-SP); AVX2, generic (Broadwell); AVX2 (Zen 2) | 10224 converted, 5064 refused as defined, 0 differences | same | same |
-| CUDA: H100, V100 (A100: the first build of this round) | same | same | same |
+| CUDA: H100, A100, V100 | same | same | same |
 | HIP: Radeon VII | same | same | same |
 
 The first HIP run of this test found a bug in the code that HiCMA-X already
@@ -214,8 +214,7 @@ floating-point contraction (CUDA `--fmad=false`, HIP `-ffp-contract=off`).
   (% of peak), issue-slot use, achieved occupancy, registers, thread
   instructions per element, L2 hit rate and the dominant stall reasons. There
   are 36 cases (`results/profiling/ncu_sweep.sh`) at 8192² and 2048²: on the
-  A100 (code before this round), on the H100 (before and after) and on the
-  V100 (after). Summaries are in `results/profiling/ncu_*.txt` and the raw
+  A100 and the H100 (before and after) and on the V100 (after). Summaries are in `results/profiling/ncu_*.txt` and the raw
   CSV in `ncu_*.csv.gz`.
 - **AMD**: rocprofv3 on the Radeon VII, before and after: FETCH_SIZE,
   WRITE_SIZE, MemUnitBusy and VALUBusy, one counter per pass (gfx906 cannot
@@ -387,18 +386,21 @@ Median over the pairs (10th percentile, minimum). In place on a strided matrix: 
 |---|---|---|---|---|---|---|
 | H100-PCIe | 2048 | 196 | 77% (61%, 45%) | 65% (40%, 33%) | 64% (32%, 24%) | 1.11, 1.88 |
 | H100-PCIe | 8192 | 196 | 95% (90%, 79%) | 90% (82%, 71%) | 89% (79%, 65%) | 1.05, 1.17 |
+| A100-PCIe-40GB | 2048 | 196 | 82% (61%, 47%) | 79% (45%, 37%) | 78% (38%, 27%) | 1.00, 1.73 |
+| A100-PCIe-40GB | 8192 | 196 | 93% (76%, 42%) | 88% (60%, 42%) | 86% (54%, 37%) | 1.05, 1.61 |
 | V100-SXM2-32GB | 2048 | 196 | 92% (86%, 75%) | 90% (86%, 81%) | 86% (83%, 67%) | 1.01, 1.13 |
 | V100-SXM2-32GB | 8192 | 196 | 94% (89%, 84%) | 90% (86%, 83%) | 90% (85%, 79%) | 1.03, 1.13 |
 | Radeon VII (gfx906) | 2048 | 196 | 94% (85%, 77%) | 78% (70%, 49%) | 75% (63%, 49%) | 1.16, 2.01 |
 | Radeon VII (gfx906) | 8192 | 196 | 101% (93%, 78%) | 97% (90%, 80%) | 96% (86%, 72%) | 1.02, 1.16 |
 
 - On large tiles a conversion runs at the speed of a copy. The median pair
-  reaches 94–101 % of a copy out of place and 90–97 % in place on the three
+  reaches 93–101 % of a copy out of place and 88–97 % in place on the four
   GPUs, and in place costs a median 2–5 % more time than out of place.
 - The slowest pairs are the ones that do the most arithmetic per byte: 2-byte
-  sources (FP16, BF16, INT16) into FP8, at 79–82 % on the H100. At 8192² no
-  pair is below 78 % of a copy out of place, or below 65 % in place on a
-  strided matrix.
+  sources (FP16, BF16, INT16) into FP8, at 79–82 % on the H100. On the A100,
+  integer and BF16 sources into FP8 are compute bound (42–57 %): the A100
+  has less integer throughput per byte of bandwidth than the H100. On the
+  H100, V100 and Radeon VII no pair is below 78 % of a copy at 8192².
 - On 2048² tiles (32 MB in FP64, near the L2 size) the fixed costs show:
   launch, and for in place the tickets and flags. In place takes a median
   1.11x the out-of-place time on the H100 and 1.16x on the Radeon VII, where
@@ -427,21 +429,21 @@ target):
 
 ### 4.2 Stochastic rounding, every pair
 
-| pair | H100-PCIe nb=2048 | H100-PCIe nb=8192 | V100-SXM2-32GB nb=2048 | V100-SXM2-32GB nb=8192 | Radeon VII (gfx906) nb=2048 | Radeon VII (gfx906) nb=8192 |
-|---|---|---|---|---|---|---|
-| fp64>fp32 | 73/74 | 94/81 | 92/86 | 99/91 | 59/64 | 64/66 |
-| fp64>fp16 | 65/59 | 86/71 | 86/82 | 91/85 | 51/45 | 55/53 |
-| fp64>bf16 | 52/51 | 62/63 | 81/79 | 86/82 | 48/44 | 51/53 |
-| fp64>e4m3 | 43/36 | 66/56 | 85/76 | 90/79 | 44/40 | 47/48 |
-| fp64>e5m2 | 42/36 | 63/55 | 85/76 | 90/79 | 44/41 | 47/48 |
-| fp32>fp16 | 24/20 | 57/48 | 70/65 | 74/67 | 42/43 | 44/45 |
-| fp32>bf16 | 23/19 | 53/46 | 71/62 | 75/64 | 42/41 | 44/48 |
-| fp32>e4m3 | 21/18 | 46/41 | 60/56 | 61/56 | 36/37 | 37/38 |
-| fp32>e5m2 | 21/18 | 43/41 | 60/56 | 61/56 | 36/37 | 37/38 |
-| fp16>e4m3 | 17/15 | 30/26 | 37/35 | 37/33 | 23/24 | 22/23 |
-| fp16>e5m2 | 16/14 | 27/26 | 37/35 | 37/33 | 23/24 | 22/23 |
-| bf16>e4m3 | 16/13 | 28/26 | 37/35 | 37/33 | 23/24 | 22/23 |
-| bf16>e5m2 | 16/14 | 28/26 | 37/35 | 37/33 | 23/24 | 22/23 |
+| pair | H100-PCIe nb=2048 | H100-PCIe nb=8192 | A100-PCIe-40GB nb=2048 | A100-PCIe-40GB nb=8192 | V100-SXM2-32GB nb=2048 | V100-SXM2-32GB nb=8192 | Radeon VII (gfx906) nb=2048 | Radeon VII (gfx906) nb=8192 |
+|---|---|---|---|---|---|---|---|---|
+| fp64>fp32 | 73/74 | 94/81 | 56/37 | 77/39 | 92/86 | 99/91 | 59/64 | 64/66 |
+| fp64>fp16 | 65/59 | 86/71 | 35/35 | 51/34 | 86/82 | 91/85 | 51/45 | 55/53 |
+| fp64>bf16 | 52/51 | 62/63 | 34/35 | 35/35 | 81/79 | 86/82 | 48/44 | 51/53 |
+| fp64>e4m3 | 43/36 | 66/56 | 33/32 | 46/27 | 85/76 | 90/79 | 44/40 | 47/48 |
+| fp64>e5m2 | 42/36 | 63/55 | 34/32 | 29/27 | 85/76 | 90/79 | 44/41 | 47/48 |
+| fp32>fp16 | 24/20 | 57/48 | 14/9 | 41/23 | 70/65 | 74/67 | 42/43 | 44/45 |
+| fp32>bf16 | 23/19 | 53/46 | 13/11 | 25/23 | 71/62 | 75/64 | 42/41 | 44/48 |
+| fp32>e4m3 | 21/18 | 46/41 | 17/14 | 24/20 | 60/56 | 61/56 | 36/37 | 37/38 |
+| fp32>e5m2 | 21/18 | 43/41 | 15/14 | 21/20 | 60/56 | 61/56 | 36/37 | 37/38 |
+| fp16>e4m3 | 17/15 | 30/26 | 14/10 | 16/14 | 37/35 | 37/33 | 23/24 | 22/23 |
+| fp16>e5m2 | 16/14 | 27/26 | 12/11 | 14/13 | 37/35 | 37/33 | 23/24 | 22/23 |
+| bf16>e4m3 | 16/13 | 28/26 | 12/11 | 14/13 | 37/35 | 37/33 | 23/24 | 22/23 |
+| bf16>e5m2 | 16/14 | 28/26 | 12/11 | 14/13 | 37/35 | 37/33 | 23/24 | 22/23 |
 
 From FP64 to FP32 and FP16 the kernels are close to memory bound on NVIDIA
 (86–99 % of a copy at 8192²). From 2-byte sources to FP8 they run at
@@ -488,18 +490,17 @@ emulated 64-bit multiplies).
 `bench/bench_gpu.cu` runs, for every case, the HiCMA-X 0.2 kernel it
 replaces (copied verbatim) and compares the outputs byte for byte. Every case
 gave identical bytes on every GPU. Geometric-mean speedups, min–max in
-brackets, are below. The A100 table is from the first round, because the A100
-was not available.
+brackets, are below.
 
 **A100-PCIe-40GB** — geometric-mean speedup over the HiCMA-X 0.2 kernels (min–max); last column: median % of a device copy of the same bytes at nb=8192
 
 | category | nb=1024 | nb=2048 | nb=4096 | nb=8192 | % of copy |
 |---|---|---|---|---|---|
-| plain (FP64/FP32/FP16/BF16) | 1.06x (0.96–1.21) | 1.30x (0.93–2.13) | 1.09x (0.95–1.20) | 1.10x (0.95–1.24) | 97% |
-| stochastic rounding | 1.06x (0.94–1.20) | 1.18x (1.13–1.25) | 1.26x (1.16–1.39) | 1.29x (1.18–1.45) | 76% |
-| FP8 transposed | 3.96x (3.79–4.06) | 4.82x (3.05–6.16) | 4.38x (3.50–5.18) | 4.63x (3.63–5.53) | 72% |
-| FP8 transposed + dynamic scale | 2.52x (2.41–2.63) | 3.30x (2.58–4.21) | 2.97x (2.45–3.60) | 3.15x (2.56–3.88) | 50% |
-| in place | 1.42x (1.36–1.50) | 2.21x (1.71–2.85) | 2.00x (1.62–2.47) | 2.06x (1.67–2.48) | 95% |
+| plain (FP64/FP32/FP16/BF16) | 1.07x (0.97–1.24) | 1.30x (0.93–2.13) | 1.09x (0.95–1.21) | 1.10x (0.95–1.25) | 97% |
+| stochastic rounding | 1.10x (1.05–1.20) | 1.19x (1.15–1.26) | 1.27x (1.19–1.40) | 1.29x (1.18–1.45) | 76% |
+| FP8 transposed | 4.60x (4.25–4.86) | 5.32x (3.36–6.75) | 5.26x (3.71–6.70) | 5.52x (3.85–6.99) | 90% |
+| FP8 transposed + dynamic scale | 2.67x (2.53–2.82) | 3.35x (2.45–4.57) | 3.16x (2.52–3.96) | 3.40x (2.64–4.37) | 51% |
+| in place | 1.44x (1.36–1.54) | 2.25x (1.62–2.91) | 1.99x (1.63–2.44) | 2.05x (1.67–2.45) | 94% |
 
 **H100-PCIe** — geometric-mean speedup over the HiCMA-X 0.2 kernels (min–max); last column: median % of a device copy of the same bytes at nb=8192
 
@@ -617,6 +618,32 @@ rounding, from FP64, was already memory bound and is unchanged. End-to-end
 factorization times were not measured again in this round. HiCMA-X's own
 documentation has the details (`docs/omnicast/README.md`).
 
+### 4.7 How much of HiCMA-X the remaining gaps touch
+
+Nsight Systems on the H100, HiCMA-X with this OmniCast, N = 32768, NB = 2048,
+adaptive decisions (`results/profiling/hicma_h100_kernel_share.txt`):
+
+| configuration | OmniCast share of GPU kernel time | of which |
+|---|---|---|
+| kind 3, FP16 band, FP16 accumulation | 8.1 % | plain `k_cvt` 7.1 %, in place 1.0 % |
+| kind 5, stochastic rounding | 5.7 % | stochastic (FP64 sources) 2.8 %, plain 2.9 % |
+| kind 5, data-type conversion 2 | 4.9 % | plain 4.9 % |
+| kind 8, FP8 (7 FP8 tiles), dynamic scaling | 5.1 % | plain 4.7 %, FP8 operands (amax + transposed) 0.4 % |
+| kind 9, FP8 SP | 0.6 % | FP8 operands 0.4 %, plain 0.2 % |
+
+GEMMs take 62–79 % of the GPU time, and TRSM/SYRK/POTRF take 21–30 %. The
+gaps of section 5 touch little of this:
+
+- HiCMA-X's stochastic rounding is from FP64, which already runs at 86–94 %
+  of a copy on the H100.
+- Dynamic FP8 scaling is 0.4 % of the time with 7 FP8 tiles. It grows with
+  the number of FP8 tiles, because each FP8 GEMM converts both operands.
+- In place is 1 % of the time.
+
+The largest OmniCast share is plain conversions, which already run at copy
+speed. The remaining lever there is in HiCMA-X: fewer conversions, for
+example converting a tile once and reusing it across GEMMs.
+
 ## 5. Remaining headroom
 
 | where | now | what limits it | what could be done |
@@ -628,6 +655,7 @@ documentation has the details (`docs/omnicast/README.md`).
 | FP16 → FP8 transposed | 55 % of DRAM (H100) | issue slots (the encoding) | the 256-entry table does not apply (65536 values); the native FP8 converts of sm_89+ and gfx942 (`cvt.rn.satfinite.e4m3x2.f16x2`) for the saturating case |
 | host FP8 encoding with AVX2 | 0.4–1.0 ns per element | about 20 integer operations per element | F16C round-toward-zero plus sticky bit (FP16 rounded to odd) then FP16 → FP8 on 16-bit lanes: half the operations, still exact |
 | host in place on large arrays | plain stores | read-for-ownership traffic | streaming stores as out of place (the destination of a chunk was read long before) |
+| integer and BF16 sources into FP8 on the A100 | 42–57 % of a copy | integer throughput (the encoding) | a 64K-entry table for 16-bit sources, or native FP8 converts on newer GPUs; HiCMA-X never converts these pairs |
 | ARM | NEON path written, not run | no hardware here | run the tests on an AArch64 machine |
 
 ## 6. Reproducing
