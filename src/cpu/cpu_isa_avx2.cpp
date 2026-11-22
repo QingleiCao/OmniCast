@@ -153,8 +153,90 @@ static void h2d(const void *src, void *dst, size_t n, const KParams &) {
     for (; k < n; k++) d[k] = cvt<double>(make<f16>(s[k]), o);
 }
 
-/* ---- FP64 -> FP32 rounded to odd, then a small format (BF16, FP8) ------- */
-/* The generic integer encoders vectorize; only the FP64 step needs help. */
+/* ---- FP32 -> FP8 through F16C ------------------------------------------ */
+/* x * 2^k (exact) to FP16 rounded to odd: truncation, then the last bit set
+ * when that was inexact. With k = -8 for E4M3 (bias 7 against 15) and k = 0
+ * for E5M2 (the FP16 exponent), the FP16 pattern lines up with the FP8 one,
+ * subnormals on subnormals, so rounding to nearest even on the 16-bit
+ * pattern finishes the job: about 2 operations per element against 20 for
+ * the integer encoder. Rounding to odd first makes the two roundings one
+ * (11 significand bits >= 4 + 2). Bit-identical to enc_f32 (test_cpu checks
+ * every FP32 pattern). Assumes the default MXCSR (no flush to zero). */
+static inline __m128i ro_ph(__m256 x) {
+    const __m128i h = _mm256_cvtps_ph(x, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+    const __m256 back = _mm256_cvtph_ps(h);
+    const __m256i inex = _mm256_castps_si256(_mm256_cmp_ps(back, x, _CMP_NEQ_UQ));   /* NaN: set, then replaced */
+    const __m128i m16 = _mm_packs_epi32(_mm256_castsi256_si128(inex), _mm256_extracti128_si256(inex, 1));
+    return _mm_or_si128(h, _mm_and_si128(m16, _mm_set1_epi16(1)));
+}
+template <class D, bool SAT>
+static inline __m128i fp8x16(__m256 a, __m256 b) {
+    constexpr bool E4 = std::is_same<D, e4m3>::value;
+    constexpr int SH = E4 ? 7 : 8;                          /* FP16 mantissa bits dropped */
+    constexpr short MAXC = E4 ? 0x7e : 0x7b, OVF = SAT ? MAXC : (E4 ? 0x7f : 0x7c), NANC = E4 ? 0x7f : 0x7e;
+    if (E4) { const __m256 sc = _mm256_set1_ps(0x1p-8f); a = _mm256_mul_ps(a, sc); b = _mm256_mul_ps(b, sc); }
+    const __m256i h = _mm256_set_m128i(ro_ph(b), ro_ph(a));
+    const __m256i mag = _mm256_and_si256(h, _mm256_set1_epi16(0x7fff));
+    const __m256i odd = _mm256_and_si256(_mm256_srli_epi16(mag, SH), _mm256_set1_epi16(1));
+    __m256i r = _mm256_srli_epi16(_mm256_add_epi16(_mm256_add_epi16(mag, _mm256_set1_epi16((1 << (SH - 1)) - 1)), odd), SH);
+    r = _mm256_blendv_epi8(r, _mm256_set1_epi16(OVF), _mm256_cmpgt_epi16(r, _mm256_set1_epi16(MAXC)));
+    r = _mm256_blendv_epi8(r, _mm256_set1_epi16(NANC), _mm256_cmpgt_epi16(mag, _mm256_set1_epi16(0x7c00)));
+    r = _mm256_or_si256(r, _mm256_srli_epi16(_mm256_andnot_si256(_mm256_set1_epi16(0x7fff), h), 8));
+    return _mm_packus_epi16(_mm256_castsi256_si128(r), _mm256_extracti128_si256(r, 1));
+}
+template <class D, bool SAT>
+static void s2fp8(const void *src, void *dst, size_t n, const KParams &) {
+    const float *s = (const float *)src; D *d = (D *)dst;
+    size_t k = 0;
+    for (; k + 16 <= n; k += 16)
+        _mm_storeu_si128((__m128i *)(d + k), fp8x16<D, SAT>(_mm256_loadu_ps(s + k), _mm256_loadu_ps(s + k + 8)));
+    const ElemOpts o{SAT, false};
+    for (; k < n; k++) d[k] = cvt<D>(s[k], o);
+}
+/* FP16 sources: exactly to FP32 first */
+template <class D, bool SAT>
+static void h2fp8(const void *src, void *dst, size_t n, const KParams &) {
+    const uint16_t *s = (const uint16_t *)src; D *d = (D *)dst;
+    size_t k = 0;
+    for (; k + 16 <= n; k += 16)
+        _mm_storeu_si128((__m128i *)(d + k), fp8x16<D, SAT>(_mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(s + k))),
+                                                            _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(s + k + 8)))));
+    const ElemOpts o{SAT, false};
+    for (; k < n; k++) d[k] = cvt<D>(make<f16>(s[k]), o);
+}
+/* ---- FP64 -> FP8: rounded to odd to FP32, then fp8x16 ------------------- */
+/* With the rounding mode set to toward zero, rounding to odd is the convert
+ * plus the last bit of an inexact result (5 operations per 4 elements
+ * against 12 for ro_pd_ps). Rounding to odd twice is rounding to odd once.
+ * The other operations of fp8x16 are exact or set their rounding. */
+static inline __m256 ro_pd8_rz(const double *p) {
+    const __m256i idx = _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6);
+    __m128 f[2];
+    for (int h = 0; h < 2; h++) {
+        const __m256d x = _mm256_loadu_pd(p + 4 * h);
+        const __m128 c = _mm256_cvtpd_ps(x);                                   /* toward zero */
+        const __m256d inex = _mm256_cmp_pd(_mm256_cvtps_pd(c), x, _CMP_NEQ_UQ);  /* NaN stays NaN */
+        const __m128i m = _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(_mm256_castpd_si256(inex), idx));
+        f[h] = _mm_castsi128_ps(_mm_or_si128(_mm_castps_si128(c), _mm_and_si128(m, _mm_set1_epi32(1))));
+    }
+    return _mm256_set_m128(f[1], f[0]);
+}
+template <class D, bool SAT>
+static void d2fp8(const void *src, void *dst, size_t n, const KParams &) {
+    const double *s = (const double *)src; D *d = (D *)dst;
+    const unsigned int csr = _mm_getcsr();
+    _mm_setcsr(csr | 0x6000u);                                                 /* RC = toward zero */
+    size_t k = 0;
+    for (; k + 16 <= n; k += 16)
+        _mm_storeu_si128((__m128i *)(d + k), fp8x16<D, SAT>(ro_pd8_rz(s + k), ro_pd8_rz(s + k + 8)));
+    _mm_setcsr(csr);
+    const ElemOpts o{SAT, false};
+    for (; k < n; k++) d[k] = cvt<D>(s[k], o);
+}
+template <class D> static void d2fp8_any(const void *a, void *b, size_t n, const KParams &p) { p.eo.sat ? d2fp8<D, true>(a, b, n, p) : d2fp8<D, false>(a, b, n, p); }
+
+/* ---- FP64 -> FP32 rounded to odd, then BF16 ----------------------------- */
+/* The generic integer encoder vectorizes; only the FP64 step needs help. */
 template <class D>
 static void d2small(const void *src, void *dst, size_t n, const KParams &p) {
     const double *s = (const double *)src; D *d = (D *)dst;
@@ -169,6 +251,15 @@ static void d2small(const void *src, void *dst, size_t n, const KParams &p) {
         k += m;
     }
 }
+/* FP32 -> E4M3 saturated: the integer encoder is as fast (0.95-1.06x on
+ * Zen 2, Broadwell and Skylake-SP); 1.6-2.3x for the other FP32 and FP16
+ * cases */
+template <class D> static void s2fp8_any(const void *a, void *b, size_t n, const KParams &p) {
+    if (std::is_same<D, e4m3>::value && p.eo.sat) k_cvt<D, float>(a, b, n, p);
+    else if (p.eo.sat) s2fp8<D, true>(a, b, n, p);
+    else s2fp8<D, false>(a, b, n, p);
+}
+template <class D> static void h2fp8_any(const void *a, void *b, size_t n, const KParams &p) { p.eo.sat ? h2fp8<D, true>(a, b, n, p) : h2fp8<D, false>(a, b, n, p); }
 
 
 /* ---- float -> integer (truncation), saturating, NaN -> 0 ----------------- */
@@ -275,8 +366,12 @@ void fill_table_avx2(Table &t) {
     t.cvt[OMC_FP64][OMC_FP16] = &isa_avx2::d2h_any;
     t.cvt[OMC_FP16][OMC_FP64] = &isa_avx2::h2d_any;
     t.cvt[OMC_FP64][OMC_BF16]     = &isa_avx2::d2small<bf16>;
-    t.cvt[OMC_FP64][OMC_FP8_E4M3] = &isa_avx2::d2small<e4m3>;
-    t.cvt[OMC_FP64][OMC_FP8_E5M2] = &isa_avx2::d2small<e5m2>;
+    t.cvt[OMC_FP64][OMC_FP8_E4M3] = &isa_avx2::d2fp8_any<e4m3>;
+    t.cvt[OMC_FP64][OMC_FP8_E5M2] = &isa_avx2::d2fp8_any<e5m2>;
+    t.cvt[OMC_FP32][OMC_FP8_E4M3] = &isa_avx2::s2fp8_any<e4m3>;
+    t.cvt[OMC_FP32][OMC_FP8_E5M2] = &isa_avx2::s2fp8_any<e5m2>;
+    t.cvt[OMC_FP16][OMC_FP8_E4M3] = &isa_avx2::h2fp8_any<e4m3>;
+    t.cvt[OMC_FP16][OMC_FP8_E5M2] = &isa_avx2::h2fp8_any<e5m2>;
     t.cvt[OMC_FP32][OMC_INT8]  = &isa_avx2::s2int<int8_t>;
     t.cvt[OMC_FP32][OMC_INT16] = &isa_avx2::s2int<int16_t>;
     t.cvt[OMC_FP32][OMC_INT32] = &isa_avx2::s2int<int32_t>;

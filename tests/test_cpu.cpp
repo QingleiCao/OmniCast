@@ -444,11 +444,72 @@ static void test_misc() {
     printf("  scaling, amax, threads, scalars, errors: ok\n");
 }
 
+/* The SIMD FP8 encoders (AVX2: F16C rounding to odd, then the 16-bit
+ * pattern) against the scalar core: every FP32 pattern with a stride of 47
+ * (OMNICAST_TEST_FP8_STRIDE=1: all of them, about 4 minutes per ISA), every
+ * FP16 and BF16 pattern, both formats and saturation modes, and FP64 values
+ * around the FP8 range. */
+static void test_fp8_encoders(const char *isa) {
+    if (omc_cpu_set_isa(isa) != 0) { printf("  (ISA %s not available)\n", isa); return; }
+    long checked = 0;
+    const char *se = getenv("OMNICAST_TEST_FP8_STRIDE");
+    const uint64_t stride = (se && atoi(se) > 0) ? (uint64_t)atoi(se) : 47;
+    const size_t B = 1u << 22;
+    std::vector<float> x(B);
+    std::vector<uint8_t> got(B);
+    for (omc_dtype_t dt : {OMC_FP8_E4M3, OMC_FP8_E5M2})
+    for (int sat = 0; sat < 2; sat++) {
+        omc_options_t o = {}; if (sat) o.flags = OMC_FLAG_SATURATE;
+        for (uint64_t b0 = 0; b0 < (1ull << 32); b0 += stride * (uint64_t)B) {
+            size_t n = 0;
+            for (uint64_t b = b0; b < (1ull << 32) && n < B; b += stride, n++) { uint32_t u = (uint32_t)b; memcpy(&x[n], &u, 4); }
+            omc_convert(OMC_FP32, x.data(), dt, got.data(), n, &o);
+            for (size_t q = 0; q < n; q++) {
+                const uint8_t ref = (dt == OMC_FP8_E4M3) ? omc_fp32_to_e4m3(x[q], sat) : omc_fp32_to_e5m2(x[q], sat);
+                if (got[q] != ref) {
+                    uint32_t u; memcpy(&u, &x[q], 4);
+                    CHECK(false, "[%s] fp32 0x%08x -> %s sat %d: got 0x%02x ref 0x%02x", isa, u, omc_dtype_name(dt), sat, got[q], ref);
+                    break;
+                }
+            }
+            checked += (long)n;
+        }
+        for (omc_dtype_t st : {OMC_FP16, OMC_BF16}) {
+            std::vector<uint16_t> h(65536);
+            std::vector<float> f(65536);
+            for (uint32_t q = 0; q < 65536; q++) h[q] = (uint16_t)q;
+            omc_convert(st, h.data(), OMC_FP32, f.data(), 65536, nullptr);      /* exact */
+            std::vector<uint8_t> g8(65536);
+            omc_convert(st, h.data(), dt, g8.data(), 65536, &o);
+            for (uint32_t q = 0; q < 65536; q++) {
+                const uint8_t ref = (dt == OMC_FP8_E4M3) ? omc_fp32_to_e4m3(f[q], sat) : omc_fp32_to_e5m2(f[q], sat);
+                if (g8[q] != ref) { CHECK(false, "[%s] %s 0x%04x -> %s sat %d", isa, omc_dtype_name(st), q, omc_dtype_name(dt), sat); break; }
+            }
+            checked += 65536;
+        }
+        std::mt19937_64 g(5);
+        std::vector<double> d(B);
+        for (auto &v : d) { uint64_t z = g(); z = (z & 0x800fffffffffffffull) | ((uint64_t)(1023 - 30 + (int)((z >> 52) % 52)) << 52); memcpy(&v, &z, 8); }
+        const double sp[] = {NAN, -NAN, INFINITY, -INFINITY, 0.0, -0.0, 1e300, -1e300, 1e-300, -1e-300, 3.5e38, 6.9e38,
+                             448.0, 464.0, 463.99999999999994, 464.00000000000006, 57344.0, 61440.0, 61439.999999999993,
+                             0x1p-10, 0x1.0000000000001p-10, 0x1p-17, 0x1.0000000000001p-17, 1.4e-45, 1e-46};
+        for (size_t q = 0; q < sizeof sp / sizeof sp[0]; q++) d[q * 17] = sp[q];
+        omc_convert(OMC_FP64, d.data(), dt, got.data(), B, &o);
+        for (size_t q = 0; q < B; q++) {
+            const uint8_t ref = (dt == OMC_FP8_E4M3) ? omc_fp64_to_e4m3(d[q], sat) : omc_fp64_to_e5m2(d[q], sat);
+            if (got[q] != ref) { CHECK(false, "[%s] fp64 %a -> %s sat %d", isa, d[q], omc_dtype_name(dt), sat); break; }
+        }
+        checked += (long)B;
+    }
+    printf("  [%s] FP8 encoders: %ld values checked\n", isa, checked);
+}
+
 int main() {
     reg_all();
     const char *isa0 = omc_cpu_isa();
     printf("OmniCast %s, CPU path %s, GPU backend %s\n", omc_version_string(), isa0, omc_gpu_backend());
     for (const char *isa : {"generic", "avx2", "avx512"}) test_pairs(isa);
+    for (const char *isa : {"avx2", "avx512"}) test_fp8_encoders(isa);
     omc_cpu_set_isa(isa0);
     test_sr();
     test_sr_integer_core();

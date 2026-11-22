@@ -4,6 +4,8 @@
  * internal per-(device, stream) workspace used by the in-place and
  * dynamically scaled conversions.
  */
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <utility>
@@ -66,15 +68,36 @@ omc_status_t get_ws(const omc_options_t *o, size_t count, gpuStream_t s, LaunchA
     return internal_ws(need, s, &a.ws, &a.ws_bytes);
 }
 
+/** Whether k_cvtT_dyn may run on a device: OMNICAST_FUSED_DYNAMIC=1 and
+ *  cooperative launch support. Off by default: alone it is 1.04-1.27x faster
+ *  than k_amax + k_cvtT (H100), but a cooperative kernel starts only when all
+ *  its blocks fit at once, so next to kernels of other streams it waits and
+ *  holds the GPU (an FP8-heavy HiCMA-X factorization: 4 % slower). */
+bool coop_launch(int dev) {
+    static std::map<int, int> known;
+    std::lock_guard<std::mutex> lk(g_mutex);
+    auto it = known.find(dev);
+    if (it != known.end()) return it->second != 0;
+    int v = 0;
+    const char *e = getenv("OMNICAST_FUSED_DYNAMIC");
+    if (e && !strcmp(e, "1")) {
+        if (gpuDeviceGetAttribute(&v, gpuDevAttrCooperativeLaunch, dev) != gpuSuccess) { gpuGetLastError(); v = 0; }
+    }
+    known[dev] = v;
+    return v != 0;
+}
+
 /** Options -> launch arguments (mode, rounding, scale). Runs the amax pass
- *  first for OMC_SCALE_DYNAMIC_POW2. */
+ *  first for OMC_SCALE_DYNAMIC_POW2, unless `fuse` (a transposed conversion)
+ *  and coop_launch: then k_cvtT_dyn does both. */
 omc_status_t prepare(omc_dtype_t st, omc_dtype_t dt, const void *src, int64_t lds, int64_t m, int64_t n,
-                     const omc_options_t *o, gpuStream_t stream, LaunchArgs &a) {
+                     const omc_options_t *o, gpuStream_t stream, LaunchArgs &a, bool fuse = false) {
     if ((unsigned)st >= OMC_NUM_DTYPES || (unsigned)dt >= OMC_NUM_DTYPES) return OMC_ERROR_INVALID_VALUE;
     static const omc_options_t zero = {};
     if (!o) o = &zero;
     a = LaunchArgs{};
     a.st = st; a.dt = dt; a.stream = stream;
+    a.device = current_device();
     a.sat = (o->flags & OMC_FLAG_SATURATE) != 0;
     a.rne = (o->rounding == OMC_ROUND_NEAREST_EVEN);
     a.seed = o->seed;
@@ -105,7 +128,11 @@ omc_status_t prepare(omc_dtype_t st, omc_dtype_t dt, const void *src, int64_t ld
         am.stream = stream;
         omc_status_t r = get_ws(o, 0, stream, am);
         if (r != OMC_SUCCESS) return r;
-        if (m > 0 && n > 0) {
+        if (m > 0 && n > 0 && fuse && coop_launch(a.device)) {
+            a.fused_amax = true;
+            a.amax_out = am.amax_out; a.scale_max = am.scale_max;
+            a.ws = am.ws; a.ws_bytes = am.ws_bytes;
+        } else if (m > 0 && n > 0) {
             r = g_launch[st](am);
             if (r != OMC_SUCCESS) return r;
         } else {
@@ -274,7 +301,7 @@ omc_status_t omc_gpu_convert_2d(omc_dtype_t st, const void *src, int64_t lds, om
     gpuStream_t s = (gpuStream_t)stream;
     if (src == dst) return inplace_2d(st, dt, dst, lds, ldd, m, n, opts, s);
     LaunchArgs a;
-    r = prepare(st, dt, src, lds, m, n, opts, s, a);
+    r = prepare(st, dt, src, lds, m, n, opts, s, a, g.tr);
     if (r != OMC_SUCCESS) return r;
     const bool padded = (g.dr != g.rows) || (g.dc != g.cols);
     if (!g.tr && !padded && plain_copy(a) && m > 0 && n > 0) {

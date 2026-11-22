@@ -316,6 +316,11 @@ void inplace_run(const Plan &pl, char *buf_src, char *buf_dst, size_t n, uint32_
     constexpr size_t B = 1024;
     alignas(64) char tmp[B * 8];
     const size_t si = pl.si, so = pl.so;
+    /* growing elements: the segments below write lines read long before
+     * (higher source elements), so stream them as out of place does (the
+     * source and destination of a segment do not overlap) */
+    const size_t thr = stream_threshold();
+    const bool stream = thr != 0 && n * so >= thr && so > si && si >= 2;
     auto via_buffer_forward = [&](size_t lo, size_t hi) {
         for (size_t k = lo; k < hi; k += B) {
             const size_t m = std::min(B, hi - k);
@@ -338,7 +343,7 @@ void inplace_run(const Plan &pl, char *buf_src, char *buf_dst, size_t n, uint32_
         while (b > H) {
             size_t a = (b * si + so - 1) / so;         /* ceil(b si / so) */
             if (a < H) a = H;
-            run1d(pl, buf_src + a * si, buf_dst + a * so, b - a, i0 + (uint32_t)a, j);
+            run1d_auto(pl, buf_src + a * si, buf_dst + a * so, b - a, i0 + (uint32_t)a, j, stream);
             b = a;
         }
         size_t k = H;

@@ -139,6 +139,22 @@ Dynamic scaling (`OMC_SCALE_DYNAMIC_POW2`) takes float sources and any target
 - The AVX-512 table reuses the AVX2 float → integer kernels (clamp,
   truncating convert, saturating packs), faster than the generic AVX-512
   loops (FP32 → INT8 0.17 against 0.22 ns per element on Skylake-SP).
+- FP8 on AVX2 (round 3): x · 2^k goes to FP16 by `vcvtps2ph` with truncation,
+  and the last bit is set when that was inexact (`vcvtph2ps` and a compare).
+  That is FP16 rounded to odd. With k = −8 for E4M3 (bias 7 against 15) and
+  k = 0 for E5M2, the FP16 bit pattern lines up with the FP8 one, subnormals
+  on subnormals. Round to nearest even on the 16-bit pattern, with overflow
+  and NaN by compares, then finishes the job: about 2 operations per element
+  against 20. Rounding to odd first makes the two roundings exact (11 ≥ 4 + 2
+  significand bits). FP64 sources are rounded to odd to FP32 with the MXCSR
+  rounding mode set to toward zero, plus the sticky bit, which takes 5
+  operations per 4 elements against 12. The result is 1.0–2.3× faster on
+  Skylake-SP, Broadwell and Zen 2. FP32 → E4M3 saturated keeps the integer
+  encoder (as fast), and so does BF16. The AVX-512 table keeps its generic
+  encoders, which are faster there.
+- Large in-place conversions that grow (FP16/BF16/FP32 → wider) stream the
+  segments they write, as out of place does above the same threshold. The
+  lines written were read long before, as the input of higher elements.
 - The 64-bit variable shifts of the integer stochastic rounding vectorize
   only with the exponent arithmetic in 64-bit lanes: GCC 11 narrows the count
   of `sig & ((1 << k) - 1)` to 32 bits and then gives up on the loop, so the
@@ -200,37 +216,60 @@ instantiations compile in parallel (35 s per architecture on 32 cores).
   take an element-by-element path. HiCMA-X converted into a scratch tile and
   copied back: 20 instead of 12 bytes per element for FP64 → FP32 and two
   launches.
-- **`k_amax`** reduces with 16-byte loads, writes per-block partials, and the
-  last block finishes the reduction and, for `OMC_SCALE_DYNAMIC_POW2`, writes
-  {amax, s, 1/s}; the conversion kernel then reads s from device memory. Two
-  kernels, no memset (HiCMA-X: memset, amax, scale, convert).
+- **`k_amax`** reduces with 16-byte loads, 4 columns in flight per thread,
+  and writes per-block partials. The last block finishes the reduction and,
+  for `OMC_SCALE_DYNAMIC_POW2`, writes {amax, s, 1/s}; the conversion kernel
+  then reads s from device memory. That is two kernels and no memset
+  (HiCMA-X: memset, amax, scale, convert). One column in flight per thread
+  was too few on the Radeon VII (with four, the whole convert is 1.9× faster
+  at 1024²).
+- **`k_cvtT_dyn`** (opt-in, `OMNICAST_FUSED_DYNAMIC=1`): `k_amax` and
+  `k_cvtT` in one cooperative kernel for transposed conversions with a
+  dynamic scale. Each block reduces its tiles, then a grid barrier (an arrival
+  and a departure counter in the workspace, left zero), then converts the
+  same tiles in reverse order, so the last ones read come from L2. Alone it is
+  1.03–1.33× faster on the H100 and 1.1–2.1× on the Radeon VII. It is not the
+  default because a cooperative launch waits until all its blocks fit on the
+  GPU and then holds it: beside GEMMs on other streams, HiCMA-X was 2 %
+  slower.
 - Conversion code on the device uses the hardware converts where they match
-  the definition (`cvt.rn.f16.f32`, `cvt.f32.f16`, `cvt.rz.f32.f64`).
+  the definition (`cvt.rn.f16.f32`, `cvt.f32.f16`, `cvt.rz.f32.f64`). On
+  sm_89+, saturated FP8 targets use `cvt.rn.satfinite.{e4m3,e5m2}x2.f32`
+  (round 3). It agrees with the integer encoder except for NaN, where it
+  returns one canonical code, so a NaN input keeps the encoder's code and
+  sign. FP64 sources go through FP32 rounded to odd first, as on the host.
+  `omnicast_native_fp8` checks all 2^32 FP32 inputs on the GPU.
 
 ## Testing
 
 | Test | What |
 |---|---|
 | `omnicast_exhaustive` | all 2^32 FP32 inputs → FP16/BF16/E4M3/E5M2, both saturation modes, against the CUDA headers; all codes → FP32; FP64 edge cases and 4M random values against an exact reference |
-| `omnicast_cpu` | every pair × 3 option sets × lengths 1..4099 (tails, misalignment) on every CPU path against the scalar core; stochastic rounding against HiCMA-X 0.2; 720 2-D/transposed/padded cases; in place for every pair (1-D and 2-D with ld > m); scaling, amax, threads, errors |
-| `omnicast_gpu` | every pair × 2 option sets × aligned/misaligned against the host; 896 2-D/transposed/padded/stochastic cases; in place for every pair up to 10^6 elements, 4 concurrent streams × 20 calls; dynamic and device scaling |
+| `omnicast_cpu` | every pair × 3 option sets × lengths 1..4099 (tails, misalignment) on every CPU path against the scalar core; stochastic rounding against HiCMA-X 0.2; 720 2-D/transposed/padded cases; in place for every pair (1-D and 2-D with ld > m); scaling, amax, threads, errors; the SIMD FP8 encoders on every 47th FP32 pattern (`OMNICAST_TEST_FP8_STRIDE=1`: all), every FP16/BF16 pattern and FP64 edge values |
+| `omnicast_gpu` | every pair × 2 option sets × aligned/misaligned against the host; 896 2-D/transposed/padded/stochastic cases; in place for every pair up to 10^6 elements, 4 concurrent streams × 20 calls; dynamic and device scaling; 144 fused dynamic-scale transposed cases (float sources, nearest and stochastic, NaN/infinity, 1 to many tiles per block) and 4 concurrent streams × 8 calls with a different scale each |
+| `omnicast_native_fp8` | CUDA, sm_89+: the hardware FP8 encode against the integer encoder on all 2^32 FP32 inputs (E4M3, E5M2) and 2^30 FP64 values |
 | `omnicast_modes`, `omnicast_modes_gpu` | every pair × 9 option sets (default, saturate, nearest, host scale, device scale, dynamic scale, stochastic, stochastic + scale, stochastic + dynamic) × 6 layouts (1-D, 2-D, ld > m, transposed, padded, both) × {out of place, in place, dst == src}, small odd and multi-chunk sizes, aligned and not: 15288 calls per mode, against the generic host conversion, on every host code path and on the GPU |
 
 ## Limitations and next steps
 
 - Packed 4-bit formats (FP4 E2M1, INT4) and microscaling (MX block scales) are
   not implemented yet; the enum and the transposed kernel leave room for them.
-- The native FP8 converts of sm_89+ (`cvt.rn.satfinite.e4m3x2.f32`) and of
-  gfx942/950 are not used yet; the software path matches them bit for bit.
+- The native FP8 converts of gfx942/950 are not used (no hardware here); those
+  of sm_89+ are, for saturated targets (round 3).
 - Stochastic rounding is bound by its random numbers: two SplitMix64 hashes
   (four 64-bit multiplies) per element, kept for compatibility with
   HiCMA-X 0.2. From 2-byte sources to FP8 that is 25-40 % of a copy on GPUs.
   A counter-based generator producing several numbers per call would be a
   new rounding definition (an option, not a replacement).
-- Dynamic scaling reads the source twice (amax, then the conversion); a
-  fused single pass would need the whole tile on chip.
+- Dynamic scaling reads the source twice (amax, then the conversion). The
+  fused kernel (`k_cvtT_dyn`) reads the second time mostly from L2, but it
+  stays opt-in because of its cooperative launch.
 - On small tiles (2048², L2-resident) in place is slower than out of place
   (median 1.1x on the H100): the ordered single pass costs a ticket, a flag
-  and a barrier per chunk.
-- AVX2 FP8 encoding is compute bound (about 20 integer operations per element).
+  and a barrier per chunk. Persistent blocks taking tickets in a loop measured
+  0.94–1.02× (round 3) and were not kept.
+- On the Radeon VII, the transposed convert of 8192² FP64 tiles takes 4.3×
+  the plain one (2.1× at 4096²). The fused kernel, with the same tile code
+  over a persistent grid, takes half of it, so the launch geometry of
+  `k_cvtT` is the suspect there.
 - The NEON code path compiles in the generic file but has not run on hardware.

@@ -83,7 +83,12 @@ Options: `CMAKE_CUDA_ARCHITECTURES` / `CMAKE_HIP_ARCHITECTURES`,
 `OMNICAST_BUILD_TESTS`, `OMNICAST_BUILD_BENCHMARKS`, `OMNICAST_INSTALL`.
 Installed, `find_package(OmniCast)` gives `OmniCast::omnicast`. As a
 subdirectory, link `omnicast`. `OMNICAST_CPU_ISA=avx2` (or `omc_cpu_set_isa`)
-forces a CPU code path.
+forces a CPU code path. `OMNICAST_STREAM_BYTES` sets the destination size
+above which host conversions use streaming stores (0: never).
+`OMNICAST_FUSED_DYNAMIC=1` makes transposed GPU conversions with
+`OMC_SCALE_DYNAMIC_POW2` run as one cooperative kernel. That is faster when
+nothing else runs on the GPU, and slower beside kernels of other streams
+(`docs/REPORT.md`, section 5).
 
 ## Design
 

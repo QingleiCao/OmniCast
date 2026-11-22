@@ -34,6 +34,16 @@ if(OMNICAST_GPU STREQUAL "CUDA" OR OMNICAST_GPU STREQUAL "HIP")
     endif()
     add_test(NAME omnicast_modes_gpu COMMAND omnicast_test_modes_gpu)
     set_tests_properties(omnicast_modes_gpu PROPERTIES LABELS "omnicast;gpu;${OMNICAST_TEST_LABELS}")
+
+    if(OMNICAST_GPU STREQUAL "CUDA")
+        # sm_89+ hardware FP8 converts against the integer encoder (skipped below 8.9)
+        add_executable(omnicast_test_native_fp8 test_native_fp8.cu)
+        target_include_directories(omnicast_test_native_fp8 PRIVATE ${PROJECT_SOURCE_DIR}/include)
+        set_target_properties(omnicast_test_native_fp8 PROPERTIES CUDA_STANDARD 17)
+        target_compile_options(omnicast_test_native_fp8 PRIVATE -O3 --ftz=false --prec-div=true --fmad=false)
+        add_test(NAME omnicast_native_fp8 COMMAND omnicast_test_native_fp8)
+        set_tests_properties(omnicast_native_fp8 PROPERTIES LABELS "omnicast;gpu;${OMNICAST_TEST_LABELS}")
+    endif()
 endif()
 
 # Exhaustive check of the scalar core against the CUDA headers' host

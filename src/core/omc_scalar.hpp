@@ -348,6 +348,23 @@ struct EncSmall {
             return make<D>(b);
         }
 #endif
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+        /* FP8, saturated: the hardware convert of sm_89+ (round to nearest
+         * even, overflow and infinity to the largest finite value), one
+         * instruction for about 20 integer operations. It returns one
+         * canonical NaN; keep the encoder's, with the sign. */
+        if constexpr ((F::kE == 4 && F::kM == 3) || (F::kE == 5 && F::kM == 2)) {
+            if (o.sat) {
+                unsigned short r;
+                if constexpr (F::kM == 3) asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(r) : "f"(0.0f), "f"(x));
+                else                      asm("cvt.rn.satfinite.e5m2x2.f32 %0, %1, %2;" : "=h"(r) : "f"(0.0f), "f"(x));
+                const uint32_t u = f2u(x);
+                const uint32_t b = ((u & 0x7fffffffu) > 0x7f800000u) ? (F::nancode | ((u >> 31) << (F::kE + F::kM)))
+                                                                    : (uint32_t)(r & 0xffu);
+                return make<D>(b);
+            }
+        }
+#endif
         return make<D>(enc_f32<F>(x, o.sat));
     }
     OMC_HD static D from_f64(double x, const ElemOpts &o) { return from_f32(f64_to_f32_ro(x), o); }

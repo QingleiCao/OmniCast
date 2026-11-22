@@ -283,7 +283,101 @@ static void test_scale() {
     printf("  scaling (host, device, dynamic power of two) and amax: ok\n");
 }
 
+/* Dynamic power-of-two scale with transposition and padding (the fused
+ * cooperative kernel, enabled in main): every float source type,
+ * round to nearest and stochastic, sizes from one element to many tiles per
+ * block, NaN and infinity, then concurrent streams with a different scale per
+ * call (counters left zero, partials not mixed up). Bit-identical to the host
+ * and the same scale triple. */
+static void test_dynamic_transpose() {
+    std::mt19937_64 g(11);
+    const omc_dtype_t srcs[] = {OMC_FP64, OMC_FP32, OMC_FP16, OMC_BF16};
+    const int sizes[][2] = {{1, 1}, {63, 65}, {64, 64}, {1000, 300}, {2048, 2048}, {4100, 300}, {300, 4100}};
+    int cases = 0;
+    for (int special = 0; special < 2; special++)
+    for (const auto &sz : sizes)
+    for (omc_dtype_t st : srcs)
+    for (int sr = 0; sr < 2; sr++) {
+        const int m = sz[0], n = sz[1];
+        omc_options_t o = {};
+        o.flags = OMC_FLAG_SATURATE | OMC_FLAG_TRANSPOSE; o.scale_mode = OMC_SCALE_DYNAMIC_POW2;
+        if (sr) { o.rounding = OMC_ROUND_STOCHASTIC; o.seed = 77 + m; }
+        o.dst_rows = n + 3; o.dst_cols = m + 5;
+        const size_t es = omc_dtype_size(st);
+        std::vector<double> A((size_t)m * n);
+        const double mag = std::ldexp(1.0, (int)(g() % 40) - 20);
+        for (auto &x : A) x = ((double)(g() >> 11) / 9007199254740992.0 - 0.5) * mag;
+        A[g() % A.size()] = 3.0 * mag;
+        if (special && A.size() > 4) {
+            A[1] = NAN; A[A.size() - 2] = -INFINITY;
+        }
+        std::vector<unsigned char> S((size_t)m * n * es);
+        omc_convert(OMC_FP64, A.data(), st, S.data(), A.size(), nullptr);
+        const size_t qn = (size_t)(n + 3) * (m + 5);
+        DBuf a(S.size()), q(qn), sc(16);
+        gMemcpy(a.p, S.data(), S.size(), gH2D);
+        o.scale_ptr = (float *)sc.p;
+        omc_status_t r = omc_gpu_convert_2d(st, a.p, m, OMC_FP8_E4M3, q.p, n + 3, m, n, &o, nullptr);
+        if (r == OMC_ERROR_NOT_SUPPORTED && sr) continue;    /* no stochastic rounding for this pair */
+        CHECK(r == OMC_SUCCESS, "dynamic transpose %d x %d from %s: %s", m, n, omc_dtype_name(st), omc_status_string(r));
+        float s3[3], hs[3] = {0, 0, 0};
+        gMemcpy(s3, sc.p, 12, gD2H);
+        std::vector<uint8_t> ref(qn), got(qn);
+        omc_options_t ho = o; ho.scale_ptr = hs;
+        omc_convert_2d(st, S.data(), m, OMC_FP8_E4M3, ref.data(), n + 3, m, n, &ho);
+        gMemcpy(got.data(), q.p, qn, gD2H);
+        CHECK(!memcmp(s3, hs, 12), "scale %d x %d %s%s: gpu {%g %g %g} host {%g %g %g}", m, n, omc_dtype_name(st),
+              sr ? " SR" : "", s3[0], s3[1], s3[2], hs[0], hs[1], hs[2]);
+        CHECK(count_diff(OMC_FP8_E4M3, got.data(), ref.data(), qn) == 0, "dynamic transpose %d x %d from %s%s%s differs",
+              m, n, omc_dtype_name(st), sr ? " SR" : "", special ? " (NaN, inf)" : "");
+        cases++;
+    }
+    /* concurrent streams, a different scale for every call */
+    {
+        const int NS = 4, CALLS = 8, m = 2048, n = 2048;
+        gStream_t st[NS];
+        for (int k = 0; k < NS; k++) gStreamCreate(&st[k]);
+        std::vector<std::vector<double>> A(NS * CALLS);
+        std::vector<DBuf *> in, out, scl;
+        for (int c = 0; c < NS * CALLS; c++) {
+            A[c].resize((size_t)m * n);
+            const double mag = std::ldexp(1.0, c - 16);
+            for (auto &x : A[c]) x = ((double)(g() >> 11) / 9007199254740992.0 - 0.5) * mag;
+            in.push_back(new DBuf((size_t)m * n * 8)); out.push_back(new DBuf((size_t)m * n)); scl.push_back(new DBuf(16));
+            gMemcpy(in[c]->p, A[c].data(), (size_t)m * n * 8, gH2D);
+        }
+        for (int call = 0; call < CALLS; call++)
+            for (int k = 0; k < NS; k++) {
+                const int c = call * NS + k;
+                omc_options_t o = {};
+                o.flags = OMC_FLAG_SATURATE | OMC_FLAG_TRANSPOSE; o.scale_mode = OMC_SCALE_DYNAMIC_POW2;
+                o.scale_ptr = (float *)scl[c]->p;
+                omc_status_t r = omc_gpu_convert_2d(OMC_FP64, in[c]->p, m, OMC_FP8_E4M3, out[c]->p, n, m, n, &o, st[k]);
+                CHECK(r == OMC_SUCCESS, "concurrent dynamic transpose: %s", omc_status_string(r));
+            }
+        gSync();
+        for (int c = 0; c < NS * CALLS; c++) {
+            omc_options_t o = {};
+            float hs[3] = {0, 0, 0}, s3[3];
+            o.flags = OMC_FLAG_SATURATE | OMC_FLAG_TRANSPOSE; o.scale_mode = OMC_SCALE_DYNAMIC_POW2; o.scale_ptr = hs;
+            std::vector<uint8_t> ref((size_t)m * n), got((size_t)m * n);
+            omc_convert_2d(OMC_FP64, A[c].data(), m, OMC_FP8_E4M3, ref.data(), n, m, n, &o);
+            gMemcpy(got.data(), out[c]->p, got.size(), gD2H);
+            gMemcpy(s3, scl[c]->p, 12, gD2H);
+            CHECK(!memcmp(s3, hs, 12), "concurrent call %d: scale gpu %g host %g", c, s3[1], hs[1]);
+            CHECK(count_diff(OMC_FP8_E4M3, got.data(), ref.data(), got.size()) == 0, "concurrent call %d differs", c);
+            delete in[c]; delete out[c]; delete scl[c];
+        }
+        for (int k = 0; k < NS; k++) gStreamDestroy(st[k]);
+        cases += NS * CALLS;
+    }
+    printf("  dynamic scale + transpose (float sources, RN/SR, NaN/inf, %d concurrent streams): %d cases\n", 4, cases);
+}
+
 int main() {
+    /* transposed conversions with a dynamic scale through the opt-in fused
+     * kernel (omnicast_test_modes_gpu covers the default amax pass) */
+    setenv("OMNICAST_FUSED_DYNAMIC", "1", 1);
     gProp p;
     gGetDeviceProperties(&p, 0);
     printf("OmniCast %s, GPU backend %s, device %s\n", omc_version_string(), omc_gpu_backend(), p.name);
@@ -291,6 +385,7 @@ int main() {
     test_2d();
     test_inplace();
     test_scale();
+    test_dynamic_transpose();
     omc_gpu_release_workspaces();
     printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;

@@ -52,9 +52,20 @@ its kernel-by-kernel before/after comparison (section 4.3) was not.
 - **HiCMA-X with the updated submodule:** CTest 54/54 on the V100 and 30/30
   in the CPU-only build. All 39 accuracy figures are identical to the build
   without OmniCast.
+- **Round 3** (section 5):
+  - FP8 encoding on sm_89+ uses the hardware convert (1.12–1.23× for saturated encodes at 2048² on the H100, 1.09× for HiCMA-X's transposed FP8 operand with a dynamic scale).
+  - The amax pass keeps 4 loads in flight (1.9× for the whole dynamic-scale
+    convert at 1024² on the Radeon VII).
+  - A fused dynamic-scaling kernel is opt-in (1.03–1.33× alone on the H100,
+    up to 2.1× on the Radeon VII, but up to 4 % slower inside HiCMA-X).
+  - On the host, FP8 encoding goes through F16C (1.0–2.3×) and large in-place
+    widening streams its stores (1.35–1.58× on Broadwell, 1.01–1.18× on Zen 2).
+  - HiCMA-X now converts each operand tile once instead of once per GEMM,
+    which removes most of its conversion time
+    (`docs/omnicast/round3/REPORT.md` in HiCMA-X).
 - **Left:** stochastic rounding from 2- and 4-byte sources is bound by its two
-  hashes per element (22–75 % of a copy). Dynamic scaling reads the source
-  twice. In place on small H100 tiles pays for its ordering. Section 5.
+  hashes per element (22–75 % of a copy). In place on small H100 tiles pays
+  for its ordering. Section 6.
 
 ## 1. Every conversion, in place and out of place
 
@@ -642,23 +653,150 @@ gaps of section 5 touch little of this:
 
 The largest OmniCast share is plain conversions, which already run at copy
 speed. The remaining lever there is in HiCMA-X: fewer conversions, for
-example converting a tile once and reusing it across GEMMs.
+example converting a tile once and reusing it across GEMMs. Round 3 did that
+(section 5.6).
 
-## 5. Remaining headroom
+## 5. Round 3: FP8 converts, dynamic scaling, host FP8 and in place
+
+This round followed FP8-heavy HiCMA-X runs. With most tiles in FP8, the amax
+pass and the transposed convert took 17 % of the H100's GPU time, because
+every FP8 GEMM converted both of its operands. HiCMA-X now converts each tile
+once (section 5.6). This section covers OmniCast's own part, and the gaps of
+the previous section 5 that could be closed. The logs are in
+`results/round3/`, and `results/round3/make_figures.py` draws the figures.
+"Before" is 60a5cd1.
+
+### 5.1 Hardware FP8 converts on sm_89+
+
+On sm_89 and newer, a saturated conversion to E4M3 or E5M2 is one
+`cvt.rn.satfinite.{e4m3,e5m2}x2.f32`, where the integer encoder needs about 20
+operations. Both round to nearest even and send overflow and infinity to the
+largest finite value. They differ only on NaN: the instruction returns one
+canonical code, so a NaN input keeps the encoder's code and sign. FP64 sources
+go through FP32 rounded to odd first, which makes the two roundings exact.
+`omnicast_native_fp8` checks the device path against the integer encoder on
+all 2^32 FP32 inputs and 2^30 FP64 values: no differences.
+
+| conversion (H100, best of 20, 3 rounds) | 2048²: before → after (µs) | speedup | 8192² speedup |
+|---|---|---|---|
+| FP32 → E4M3, saturated | 11.2 → 9.4 | 1.19× | 1.00× |
+| FP16 → E4M3, saturated | 11.2 → 9.1 | 1.23× | 1.06× |
+| BF16 → E4M3, saturated | 11.5 → 9.5 | 1.21× | 1.13× |
+| FP64 → E4M3, saturated | 17.6 → 15.7 | 1.12× | 1.03× |
+| FP32 → E5M2, saturated | 11.2 → 9.7 | 1.15× | 1.00× |
+| FP32 → E4M3, saturated, scaled | 11.5 → 9.7 | 1.19× | 0.99× |
+| FP16 → E4M3, transposed | 14.7 → 13.2 | 1.12× | 1.10× |
+| FP32 → E4M3, transposed | 14.1 → 13.1 | 1.08× | 1.06× |
+| FP64 → E4M3, transposed | 20.0 → 19.2 | 1.04× | 1.01× |
+| FP64 → E4M3, dynamic scale | 32.6 → 29.3 | 1.11× | 1.06× |
+| FP64 → E4M3, transposed, dynamic scale (HiCMA-X's FP8 operand) | 36.2 → 33.1 | 1.09× | 1.06× |
+| FP32 → E4M3, transposed, dynamic scale | 25.7 → 23.6 | 1.09× | 1.09× |
+| FP32 → E4M3, not saturated (integer encoder) | 11.4 → 10.9 | 1.05× | 0.99× |
+| FP16 → E5M2 (its own bit path) | 11.4 → 11.5 | 0.99× | 1.00× |
+| FP64 → FP32 (unchanged, for reference) | 29.7 → 29.5 | 1.01× | 1.00× |
+
+The saturated FP8 encodes gain 1.12–1.23× at 2048², where they were bound by the
+encoding. At 8192² they gain up to 1.13×; 4-byte sources were already memory
+bound there. The dynamic-scale rows include the amax change of section 5.2.
+
+![Round 3 on the H100](figures/round3_h100.png)
+
+### 5.2 Dynamic scaling
+
+- **amax.** `k_amax` kept one 16-byte load in flight per thread, one column
+  at a time, too few on the Radeon VII. It now issues the loads of 4 columns
+  together. The whole dynamic-scale
+  convert gets 1.9× faster at 1024² and 1.19× at 2048² there; at 4096² and
+  8192² the transposed convert dominates.
+- **Fused kernel** (`k_cvtT_dyn`, opt-in with `OMNICAST_FUSED_DYNAMIC=1`).
+  One cooperative kernel does both steps. Each block reduces its tiles, a
+  grid barrier publishes the amax, and the block converts the same tiles in
+  reverse order, so the ones read last come back from L2. Alone it is faster:
+  1.03–1.33× on the H100 (against the two-kernel path with the new amax), and 1.13–2.09× on the Radeon VII (against the
+  two-kernel path of 60a5cd1).
+  - It is not the default. A cooperative launch starts only when all its
+    blocks fit on the GPU, and then holds the GPU until the barrier. Inside
+    HiCMA-X, beside GEMMs on other streams, the FP8-heavy factorization
+    (N = 32768, `--fixedacc 1e-1`) took 4 % longer with it than without it
+    when every GEMM converted its operands, and 1 % longer with HiCMA-X's
+    operand cache (medians of 12 runs,
+    `results/round3/hicma_h100_fused_end_to_end.txt`).
+  - The bits are those of the two-kernel path. `omnicast_gpu` runs 144 cases
+    through it (every float source, nearest and stochastic rounding, NaN and
+    infinity, one to many tiles per block) and 4 concurrent streams × 8
+    calls with a different scale each.
+
+![Dynamic scaling](figures/round3_dynamic_scale.png)
+
+### 5.3 Host FP8 encoding through F16C
+
+`vcvtps2ph` with truncation, plus the last bit set when the result was
+inexact, gives FP16 rounded to odd.
+- Scaling by 2⁻⁸ for E4M3 (exact) lines the FP16 bit pattern up with the FP8
+  one, subnormals on subnormals. E5M2 needs no scaling.
+- Round to nearest even on the 16-bit pattern then gives the FP8 code. Two
+  compares handle overflow and NaN.
+- FP64 sources are rounded to odd to FP32 with the MXCSR rounding mode set to
+  toward zero, plus the sticky bit: 5 operations per 4 elements against 12.
+
+The encoder matches the scalar core on every FP32 pattern (both formats, both
+saturation modes; 1.7·10¹⁰ checks on Zen 2 and on Broadwell), on every FP16
+and BF16 pattern, and on FP64 edge values. `omnicast_cpu` runs every 47th
+FP32 pattern. Per element, one thread:
+
+![Host FP8 encoding](figures/round3_cpu_fp8.png)
+
+FP32 → E4M3 saturated and BF16 sources keep the integer encoder, which is as
+fast (0.95–1.06×). The AVX-512 table keeps its generic encoders, which are
+faster on Skylake-SP (0.23 against 0.44 ns per element for FP32).
+
+### 5.4 Host in place: streaming stores
+
+Out of place streams destinations of 16 MB or more (not on Skylake-SP, where
+streaming is slower). In place did not: the segments it writes when elements
+grow were read long before, as the input of higher elements, so every store
+first read its line. Those segments are now streamed under the same rule. A
+segment's source and destination do not overlap, and nothing written is read
+again. In place, 2^25 elements, one thread:
+
+![Host in place](figures/round3_cpu_inplace.png)
+
+### 5.5 Tried and dropped
+
+**Persistent blocks for the GPU in-place kernel.** Resident blocks took
+tickets in a loop instead of one block per chunk. That stays deadlock-free (a
+block waits only for chunks of earlier tickets, held by running blocks), but
+it measured 0.94–1.02× on the H100
+(`results/round3/h100_experiments_persistent_inplace.txt`, the `--inplace`
+rows), so it was not kept.
+
+### 5.6 HiCMA-X: converting once
+
+HiCMA-X now keeps, per GPU, the FP8, FP16/BF16 and FP32 copies of the panel
+tiles its GEMMs read, and converts each once per factorization instead of
+once per GEMM. Results are bit-identical. The conversions' share of the H100's
+GPU kernel time falls from 19.2 % to 4.9 % (kind 8, FP8 almost everywhere)
+and from 7.6 % to 3.5 % (kind 5 with stochastic rounding). Factorizations at
+N = 45056 run 1.07–1.08× faster with FP8 and 1.02–1.04× in FP32/FP16. Design,
+tests and measurements are in HiCMA-X's `docs/omnicast/round3/REPORT.md`.
+
+## 6. Remaining headroom
 
 | where | now | what limits it | what could be done |
 |---|---|---|---|
-| stochastic rounding from 2- and 4-byte sources | 27–57 % of a copy (H100), 37–75 % (V100) | issue slots: two SplitMix64 hashes per element | the hashes define the HiCMA-X 0.2 results; a counter-based generator giving several numbers per call would be a new, optional rounding definition |
+| stochastic rounding from 2- and 4-byte sources | 27–57 % of a copy (H100), 37–75 % (V100) | issue slots: two SplitMix64 hashes per element | the hashes define the HiCMA-X 0.2 results; a counter-based generator giving several numbers per call would be a new, optional rounding definition. Not done: HiCMA-X rounds stochastically from FP64, which is already memory bound |
 | stochastic rounding on the Radeon VII | 22–66 % of a copy | 64-bit integer multiplies and FP64 (1/4 rate on gfx906) | same |
-| dynamic scaling | about 50 % of a copy | the source is read twice (amax, then the conversion) | a single pass when the tile fits on chip (registers and shared memory, a few tens of MB on the H100), with persistent blocks and a grid barrier |
-| in place on small GPU tiles | median 1.11x (H100) and 1.16x (Radeon VII) the out-of-place time at 2048² | ticket, flag and barrier per chunk, few waves | persistent blocks over the chunks; host-tracked epochs instead of the reset pass |
-| FP16 → FP8 transposed | 55 % of DRAM (H100) | issue slots (the encoding) | the 256-entry table does not apply (65536 values); the native FP8 converts of sm_89+ and gfx942 (`cvt.rn.satfinite.e4m3x2.f16x2`) for the saturating case |
-| host FP8 encoding with AVX2 | 0.4–1.0 ns per element | about 20 integer operations per element | F16C round-toward-zero plus sticky bit (FP16 rounded to odd) then FP16 → FP8 on 16-bit lanes: half the operations, still exact |
-| host in place on large arrays | plain stores | read-for-ownership traffic | streaming stores as out of place (the destination of a chunk was read long before) |
-| integer and BF16 sources into FP8 on the A100 | 42–57 % of a copy | integer throughput (the encoding) | a 64K-entry table for 16-bit sources, or native FP8 converts on newer GPUs; HiCMA-X never converts these pairs |
+| dynamic scaling | the source is read twice | amax, then the conversion | round 3: the amax pass has 4 loads in flight; the fused kernel reads the second time from L2, opt-in because its cooperative launch hurts concurrent work |
+| transposed convert on the Radeon VII, large tiles | 4.3× the plain convert at 8192² (2.1× at 4096²) | the launch geometry, it seems: the fused kernel runs the same tile code in half the time | a persistent grid for `k_cvtT` on HIP, measured first on other AMD GPUs |
+| in place on small GPU tiles | median 1.11× (H100) and 1.16× (Radeon VII) the out-of-place time at 2048² | ticket, flag and barrier per chunk | persistent blocks measured 0.94–1.02× (round 3); host-tracked epochs instead of the reset pass are left |
+| FP16 → FP8 transposed | — | — | round 3: hardware converts on sm_89+ (1.12× at 2048², 1.10× at 8192²) |
+| host FP8 encoding with AVX2 | — | — | round 3: F16C rounding to odd, 1.0–2.3× |
+| host in place on large arrays | — | — | round 3: streaming stores for growing types, 1.35–1.58× (Broadwell), 1.01–1.18× (Zen 2) |
+| integer and BF16 sources into FP8 on the A100 | 42–57 % of a copy | integer throughput (the encoding) | a 64K-entry table for 16-bit sources; native converts on sm_89+ cover BF16 (through FP32) since round 3; HiCMA-X never converts these pairs |
+| native FP8 converts on AMD (gfx942/950) | not used | no such GPU here | the same scheme as sm_89+ |
 | ARM | NEON path written, not run | no hardware here | run the tests on an AArch64 machine |
 
-## 6. Reproducing
+## 7. Reproducing
 
 ```bash
 cmake -S . -B build -DOMNICAST_GPU_BACKEND=CUDA -DCMAKE_CUDA_ARCHITECTURES="70;80;90" -DOMNICAST_BUILD_BENCHMARKS=ON
@@ -674,5 +812,14 @@ python3 results/make_report_tables.py                            # the tables of
 ```
 
 `results/profiling/variants_build.sh` and `variants_measure.sh` rebuild and
-time the round-count variants of section 3.3.
+time the round-count variants of section 3.3. Round 3:
+
+```bash
+build/tests/omnicast_test_native_fp8                              # sm_89+: hardware FP8 encode, all FP32 inputs
+OMNICAST_TEST_FP8_STRIDE=1 build/tests/omnicast_test_cpu           # host FP8 encoders on every FP32 pattern
+OMNICAST_FUSED_DYNAMIC=1 build/bench/omnicast_prof_gpu --src fp64 --dst e4m3 --sat --trans --dyn --m 2048 --n 2048
+build/bench/omnicast_prof_cpu --src fp16 --dst e4m3 --isa avx2 --n 262144 --threads 1
+build/bench/omnicast_prof_cpu --src fp32 --dst fp64 --inplace --n 33554432 --threads 1
+python3 results/round3/make_figures.py
+```
 

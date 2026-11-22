@@ -1,0 +1,37 @@
+# HiCMA-X kind 8 on the H100 (hexane), N = 32768, NB = 2048, adaptive decisions, this OmniCast, 2026-11-22
+# FP8 tiles: fixedacc 1e-8 -> 7, 1e-5 -> 22, 1e-3 -> 58, 1e-2 -> 74, 1e-1 -> 120 (of 136)
+
+# factorization time (s), interleaved, fp8_scaling 1 = dynamic power-of-two scale per operand
+fixedacc=1e-1 (120 FP8 tiles): scaled 0.33454 0.34831 0.32821 | unscaled 0.34339 0.31764 0.34271
+fixedacc=1e-3 (58 FP8 tiles):  scaled 0.39125 0.38998 0.39923 | unscaled 0.38462 0.37701 0.37769
+
+# GPU kernel time by class (Nsight Systems, one run each)
+k8_acc1e-1_s0: GPU kernel time 269.8 ms, OmniCast 32.88 ms (12.2 %)
+  TRSM/SYRK/POTRF             119.26 ms  44.2 %    3856 launches
+  GEMM                         96.57 ms  35.8 %    3840 launches
+  omc k_cvtT                   25.41 ms   9.4 %    1120 launches
+  other                        21.06 ms   7.8 %     576 launches
+  omc k_cvt                     7.47 ms   2.8 %     240 launches
+
+k8_acc1e-1_s1: GPU kernel time 308.2 ms, OmniCast 58.57 ms (19.0 %)
+  TRSM/SYRK/POTRF             127.38 ms  41.3 %    3856 launches
+  GEMM                        101.38 ms  32.9 %    3840 launches
+  omc k_amax                   27.66 ms   9.0 %    1120 launches
+  omc k_cvtT scaled            23.54 ms   7.6 %    1120 launches
+  other                        20.86 ms   6.8 %     576 launches
+  omc k_cvt                     7.38 ms   2.4 %     240 launches
+
+k8_acc1e-3_s0: GPU kernel time 269.9 ms, OmniCast 35.87 ms (13.3 %)
+  TRSM/SYRK/POTRF             106.26 ms  39.4 %    3856 launches
+  GEMM                         97.59 ms  36.2 %    3840 launches
+  other                        30.14 ms  11.2 %     576 launches
+  omc k_cvt                    25.96 ms   9.6 %     972 launches
+  omc k_cvtT                    9.91 ms   3.7 %     388 launches
+
+k8_acc1e-3_s1: GPU kernel time 279.3 ms, OmniCast 46.00 ms (16.5 %)
+  TRSM/SYRK/POTRF             103.95 ms  37.2 %    3856 launches
+  GEMM                        100.46 ms  36.0 %    3840 launches
+  other                        28.93 ms  10.4 %     576 launches
+  omc k_cvt                    24.77 ms   8.9 %     972 launches
+  omc k_amax                   11.88 ms   4.3 %     388 launches
+  omc k_cvtT scaled             9.35 ms   3.3 %     388 launches

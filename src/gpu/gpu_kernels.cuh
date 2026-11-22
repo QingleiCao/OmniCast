@@ -19,6 +19,11 @@
  *             zeroes the flags for the next call.
  *  k_amax     max |x| with a last-block finish that can also write the dynamic
  *             power-of-two scale {amax, s, 1/s}.
+ *  k_cvtT_dyn k_amax and k_cvtT in one cooperative kernel for the dynamic
+ *             scale: amax over each block's tiles, a grid barrier, then the
+ *             transposed conversion of the same tiles in reverse order, the
+ *             last read first, mostly from L2. Opt-in (OMNICAST_FUSED_DYNAMIC=1,
+ *             see coop_launch in gpu_api.cu).
  */
 #ifndef OMC_GPU_KERNELS_CUH
 #define OMC_GPU_KERNELS_CUH
@@ -263,19 +268,13 @@ template <class D> struct TP {
     static constexpr int pitch = (int)(64 * sizeof(D) + (sizeof(D) > 4 ? sizeof(D) : 4));    /* bytes */
 };
 
+/** One 64 x 64 tile of k_cvtT: source rows i0.., source columns j0.. */
 template <class S, class D, int MODE>
-__global__ void __launch_bounds__(kThreads)
-k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int64_t dr, int64_t dc,
-       ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index, int vec) {
+__device__ __forceinline__ void cvtT_tile(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n,
+                                          int64_t dr, int64_t dc, const Conv<S, D, MODE> &cv, int64_t i0,
+                                          int64_t j0, int vec, unsigned char *tile_raw) {
     constexpr int W = TP<D>::W, P = TP<D>::pitch;
-    __shared__ __align__(16) unsigned char tile_raw[64 * P];
-    if ((MODE == MODE_SCALED || MODE == MODE_SR_SCALED) && scale_ptr) op.scale = scale_ptr[scale_index];
-    OMC_LUT_DECL(S, D, MODE);
-    fill_lut<S, D, MODE>(lut_, op);
-    const Conv<S, D, MODE> cv{op, lut_};
     const int t = threadIdx.x;
-    const int64_t i0 = (int64_t)blockIdx.x * 64;            /* source rows = dst columns */
-    for (int64_t j0 = (int64_t)blockIdx.y * 64; j0 < dr; j0 += (int64_t)gridDim.y * 64) {   /* source columns = dst rows */
         {   /* read: thread (ti = t % 64, tj = t / 64), columns tj, tj + 4, ...;
              * the OMC_T_LOADS loads of a thread are issued before any
              * conversion, so that they are in flight together */
@@ -326,7 +325,20 @@ k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int
             }
         }
         __syncthreads();
-    }
+}
+
+template <class S, class D, int MODE>
+__global__ void __launch_bounds__(kThreads)
+k_cvtT(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int64_t dr, int64_t dc,
+       ElemOp<S, D, MODE> op, const float *scale_ptr, int scale_index, int vec) {
+    __shared__ __align__(16) unsigned char tile_raw[64 * TP<D>::pitch];
+    if ((MODE == MODE_SCALED || MODE == MODE_SR_SCALED) && scale_ptr) op.scale = scale_ptr[scale_index];
+    OMC_LUT_DECL(S, D, MODE);
+    fill_lut<S, D, MODE>(lut_, op);
+    const Conv<S, D, MODE> cv{op, lut_};
+    const int64_t i0 = (int64_t)blockIdx.x * 64;            /* source rows = dst columns */
+    for (int64_t j0 = (int64_t)blockIdx.y * 64; j0 < dr; j0 += (int64_t)gridDim.y * 64)   /* source columns = dst rows */
+        cvtT_tile<S, D, MODE>(src, lds, dst, ldd, m, n, dr, dc, cv, i0, j0, vec, tile_raw);
 }
 
 __device__ __forceinline__ uint32_t load_flag(const uint32_t *p) {
@@ -449,20 +461,37 @@ k_amax(const S *src, int64_t lds, int64_t m, int64_t n, uint32_t *ws, float *out
     __shared__ float red[kThreads];
     __shared__ int s_last;
     float mx = 0.0f;
-    for (int64_t j = blockIdx.y; j < n; j += gridDim.y) {
-        const S *col = src + j * lds;
-        int64_t i = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * VW;
-        const int64_t stride = (int64_t)gridDim.x * blockDim.x * VW;
+    /* AU columns per pass, their loads issued together: one 16-byte load in
+     * flight per thread was too few on the Radeon VII (the dynamic-scale
+     * convert got 1.9x faster at 1024^2 with four) */
+    constexpr int AU = 4;
+    const int64_t stride = (int64_t)gridDim.x * blockDim.x * VW;
+    const int64_t i0 = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * VW;
+    for (int64_t j0 = blockIdx.y; j0 < n; j0 += (int64_t)gridDim.y * AU) {
+        int64_t i = i0;
         if (vec) {
             for (; i + VW <= m; i += stride) {
-                S v[VW];
-                vload(col + i, v);
+                S v[AU][VW];
 #pragma unroll
-                for (int k = 0; k < VW; k++) mx = fmaxf(mx, abs_f32(v[k]));
+                for (int u = 0; u < AU; u++) {
+                    const int64_t j = j0 + (int64_t)u * gridDim.y;
+                    if (j < n) vload(src + j * lds + i, v[u]);
+                    else
+#pragma unroll
+                        for (int k = 0; k < VW; k++) v[u][k] = Zero<S>::get();
+                }
+#pragma unroll
+                for (int u = 0; u < AU; u++)
+#pragma unroll
+                    for (int k = 0; k < VW; k++) mx = fmaxf(mx, abs_f32(v[u][k]));
             }
         }
         for (; i < m; i += stride)
-            for (int k = 0; k < VW && i + k < m; k++) mx = fmaxf(mx, abs_f32(col[i + k]));
+            for (int u = 0; u < AU; u++) {
+                const int64_t j = j0 + (int64_t)u * gridDim.y;
+                if (j < n)
+                    for (int k = 0; k < VW && i + k < m; k++) mx = fmaxf(mx, abs_f32(src[j * lds + i + k]));
+            }
     }
     red[threadIdx.x] = mx;
     __syncthreads();
@@ -501,6 +530,97 @@ k_amax(const S *src, int64_t lds, int64_t m, int64_t n, uint32_t *ws, float *out
     }
 }
 
+/* Grid barrier of k_cvtT_dyn: wait while another block has not arrived */
+__device__ __forceinline__ void omc_sleep() {
+#if defined(OMC_BACKEND_HIP)
+    __builtin_amdgcn_s_sleep(1);
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+    __nanosleep(64);
+#endif
+}
+
+/* Dynamic power-of-two scale and transposed conversion in one kernel. Needs
+ * every block resident (cooperative launch, gridDim.x <= kMaxAmaxBlocks).
+ * Block b owns tiles b, b + gridDim.x, ... of the ntx x nty tiles (k_cvtT's
+ * tiles, x along the source rows). Same amax as k_amax (the maximum of the
+ * same values), so the same scale and result as k_amax + k_cvtT. */
+template <class S, class D, int MODE>
+__global__ void __launch_bounds__(kThreads)
+k_cvtT_dyn(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n, int64_t dr, int64_t dc,
+           ElemOp<S, D, MODE> op, float *out, float target, uint32_t *ws, int vec, int vec_src, int64_t ntx,
+           int64_t ntiles) {
+    __shared__ __align__(16) unsigned char tile_raw[64 * TP<D>::pitch];
+    __shared__ float red[kThreads];
+    const int t = threadIdx.x;
+    float mx = 0.0f;
+    /* amax: 16-byte loads where the tile is whole and the source aligned */
+    constexpr int VW = 16 / (int)sizeof(S);       /* elements per load */
+    constexpr int VPC = 64 / VW;                  /* loads per tile column */
+    constexpr int CPP = kThreads / VPC;           /* tile columns per pass */
+    constexpr int NV = 64 / CPP;                  /* loads per thread and tile */
+    const int vr = t % VPC, vcol = t / VPC;
+    const int ti = t & 63, tj = t >> 6;
+    for (int64_t q = blockIdx.x; q < ntiles; q += gridDim.x) {
+        const int64_t i0 = (q % ntx) * 64, j0 = (q / ntx) * 64;
+        if (vec_src && i0 + 64 <= m && j0 + 64 <= n) {
+            S v[NV][VW];
+#pragma unroll
+            for (int c = 0; c < NV; c++) vload(src + (j0 + vcol + c * CPP) * lds + i0 + vr * VW, v[c]);
+#pragma unroll
+            for (int c = 0; c < NV; c++)
+#pragma unroll
+                for (int k = 0; k < VW; k++) mx = fmaxf(mx, abs_f32(v[c][k]));
+        } else if (i0 + ti < m) {
+            const int64_t i = i0 + ti;
+            S v[16];
+#pragma unroll
+            for (int c = 0; c < 16; c++) {
+                const int64_t j = j0 + tj + 4 * c;
+                v[c] = (j < n) ? src[j * lds + i] : Zero<S>::get();
+            }
+#pragma unroll
+            for (int c = 0; c < 16; c++) mx = fmaxf(mx, abs_f32(v[c]));
+        }
+    }
+    red[t] = mx;
+    __syncthreads();
+    for (int r = kThreads / 2; r > 0; r >>= 1) {
+        if (t < r) red[t] = fmaxf(red[t], red[t + r]);
+        __syncthreads();
+    }
+    uint32_t *part = ws + 4;
+    if (t == 0) {
+        part[blockIdx.x] = __float_as_uint(red[0]);
+        __threadfence();
+        atomicAdd(&ws[3], 1u);
+        while (*(volatile uint32_t *)&ws[3] < gridDim.x) omc_sleep();
+        __threadfence();
+    }
+    __syncthreads();
+    float v = 0.0f;
+    for (uint32_t q = t; q < gridDim.x; q += kThreads) v = fmaxf(v, __uint_as_float(*(volatile uint32_t *)&part[q]));
+    red[t] = v;
+    __syncthreads();
+    for (int r = kThreads / 2; r > 0; r >>= 1) {
+        if (t < r) red[t] = fmaxf(red[t], red[t + r]);
+        __syncthreads();
+    }
+    const float amax = red[0];
+    const float s = pow2_scale(amax, target);
+    if (t == 0) {
+        if (blockIdx.x == 0) { out[0] = amax; out[1] = s; out[2] = 1.0f / s; }
+        /* the last block past the barrier leaves the counters zero */
+        if (atomicAdd(&ws[2], 1u) == gridDim.x - 1u) { ws[3] = 0u; ws[2] = 0u; __threadfence(); }
+    }
+    op.scale = s;
+    OMC_LUT_DECL(S, D, MODE);
+    fill_lut<S, D, MODE>(lut_, op);
+    const Conv<S, D, MODE> cv{op, lut_};
+    const int64_t last = blockIdx.x + ((ntiles - 1 - blockIdx.x) / gridDim.x) * gridDim.x;
+    for (int64_t q = last; q >= (int64_t)blockIdx.x; q -= gridDim.x)
+        cvtT_tile<S, D, MODE>(src, lds, dst, ldd, m, n, dr, dc, cv, (q % ntx) * 64, (q / ntx) * 64, vec, tile_raw);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Host-side launch                                                          */
 /* ------------------------------------------------------------------------ */
@@ -510,6 +630,64 @@ inline omc_status_t check_launch() {
 }
 
 inline bool aligned16(const void *p) { return ((uintptr_t)p & 15u) == 0; }
+
+/** k_amax over a's source, writing {amax} or {amax, s, 1/s} to out */
+template <class S>
+omc_status_t launch_amax(const LaunchArgs &a, float *out, int write_scale) {
+    constexpr int AV = 16 / (int)sizeof(S);
+    int64_t gx = (a.m + kThreads * AV - 1) / (kThreads * AV);
+    if (gx > 64) gx = 64;
+    if (gx < 1) gx = 1;
+    int64_t gy = kMaxAmaxBlocks / gx;
+    if (gy > a.n) gy = a.n;
+    if (gy < 1) gy = 1;
+    if ((size_t)(kMaxAmaxBlocks + 4) * 4 > a.ws_bytes) return OMC_ERROR_INVALID_VALUE;
+    const int vec = aligned16(a.src) && (a.n <= 1 || ((a.lds * (int64_t)sizeof(S)) % 16) == 0);
+    k_amax<S><<<dim3((unsigned)gx, (unsigned)gy), kThreads, 0, a.stream>>>(
+        static_cast<const S *>(a.src), a.lds, a.m, a.n, static_cast<uint32_t *>(a.ws), out, write_scale,
+        a.scale_max, vec);
+    return check_launch();
+}
+
+/** k_cvtT_dyn as a cooperative kernel; an error (nothing launched) when the
+ *  device cannot run it */
+template <class S, class D, int MODE>
+omc_status_t launch_cvtT_dyn(const LaunchArgs &a, const ElemOp<S, D, MODE> &op, int vec) {
+    static int per_sm[64];   /* resident blocks per SM, by device (0: not known yet) */
+    if (a.device < 0 || a.device >= 64) return OMC_ERROR_NOT_SUPPORTED;
+    if (per_sm[a.device] == 0) {
+        int v = 0;
+        if (gpuOccupancyMaxActiveBlocksPerMultiprocessor(&v, k_cvtT_dyn<S, D, MODE>, kThreads, 0) != gpuSuccess) {
+            gpuGetLastError();
+            v = -1;
+        }
+        per_sm[a.device] = v > 0 ? v : -1;
+    }
+    if (per_sm[a.device] < 0) return OMC_ERROR_NOT_SUPPORTED;
+    int64_t ntx = (a.dc + 63) / 64, ntiles = ntx * ((a.dr + 63) / 64);
+    int64_t grid = (int64_t)per_sm[a.device] * a.num_sms;
+    if (grid > kMaxAmaxBlocks) grid = kMaxAmaxBlocks;
+    if (grid > ntiles) grid = ntiles;
+    if (grid < 1 || (size_t)(4 + kMaxAmaxBlocks) * 4 > a.ws_bytes) return OMC_ERROR_NOT_SUPPORTED;
+    const S *src = static_cast<const S *>(a.src);
+    D *dst = static_cast<D *>(a.dst);
+    int64_t lds = a.lds, ldd = a.ldd, m = a.m, n = a.n, dr = a.dr, dc = a.dc;
+    ElemOp<S, D, MODE> opv = op;
+    float *out = a.amax_out;
+    float target = a.scale_max;
+    uint32_t *ws = static_cast<uint32_t *>(a.ws);
+    int vecv = vec;
+    int vec_src = aligned16(src) && (n <= 1 || ((lds * (int64_t)sizeof(S)) % 16) == 0);
+    void *args[] = {(void *)&src, (void *)&lds, (void *)&dst, (void *)&ldd, (void *)&m, (void *)&n,
+                    (void *)&dr, (void *)&dc, (void *)&opv, (void *)&out, (void *)&target, (void *)&ws,
+                    (void *)&vecv, (void *)&vec_src, (void *)&ntx, (void *)&ntiles};
+    if (gpuLaunchCooperativeKernel((const void *)k_cvtT_dyn<S, D, MODE>, dim3((unsigned)grid), dim3(kThreads),
+                                   args, 0, a.stream) != gpuSuccess) {
+        gpuGetLastError();
+        return OMC_ERROR_NOT_SUPPORTED;
+    }
+    return OMC_SUCCESS;
+}
 
 template <class S, class D, int MODE>
 omc_status_t launch_mode(const LaunchArgs &a) {
@@ -543,6 +721,17 @@ omc_status_t launch_mode(const LaunchArgs &a) {
         if (gy > 65535) gy = 65535;
         if (gx > 0x7fffffff) return OMC_ERROR_NOT_SUPPORTED;
         const int vec = (((uintptr_t)dst & 3u) == 0) && (((a.ldd * (int64_t)sizeof(D)) & 3) == 0);
+        if constexpr (Traits<S>::is_float && (MODE == MODE_SCALED || MODE == MODE_SR_SCALED)) {
+            if (a.fused_amax) {
+                if (launch_cvtT_dyn<S, D, MODE>(a, op, vec) == OMC_SUCCESS) return OMC_SUCCESS;
+                /* no cooperative launch: amax pass first */
+                const omc_status_t r = launch_amax<S>(a, a.amax_out, 1);
+                if (r != OMC_SUCCESS) return r;
+                k_cvtT<S, D, MODE><<<dim3((unsigned)gx, (unsigned)gy), kThreads, 0, a.stream>>>(
+                    src, a.lds, dst, a.ldd, a.m, a.n, a.dr, a.dc, op, a.amax_out, 1, vec);
+                return check_launch();
+            }
+        }
         k_cvtT<S, D, MODE><<<dim3((unsigned)gx, (unsigned)gy), kThreads, 0, a.stream>>>(
             src, a.lds, dst, a.ldd, a.m, a.n, a.dr, a.dc, op, a.scale_ptr, a.scale_index, vec);
         return check_launch();
@@ -590,19 +779,7 @@ template <class S>
 omc_status_t launch_for_src(const LaunchArgs &a) {
     if (a.op == OP_AMAX) {
         if constexpr (Traits<S>::is_float) {
-            constexpr int AV = 16 / (int)sizeof(S);
-            int64_t gx = (a.m + kThreads * AV - 1) / (kThreads * AV);
-            if (gx > 64) gx = 64;
-            if (gx < 1) gx = 1;
-            int64_t gy = kMaxAmaxBlocks / gx;
-            if (gy > a.n) gy = a.n;
-            if (gy < 1) gy = 1;
-            if ((size_t)(kMaxAmaxBlocks + 4) * 4 > a.ws_bytes) return OMC_ERROR_INVALID_VALUE;
-            const int vec = aligned16(a.src) && (a.n <= 1 || ((a.lds * (int64_t)sizeof(S)) % 16) == 0);
-            k_amax<S><<<dim3((unsigned)gx, (unsigned)gy), kThreads, 0, a.stream>>>(
-                static_cast<const S *>(a.src), a.lds, a.m, a.n, static_cast<uint32_t *>(a.ws),
-                a.amax_out, a.amax_scale, a.scale_max, vec);
-            return check_launch();
+            return launch_amax<S>(a, a.amax_out, a.amax_scale);
         } else {
             return OMC_ERROR_NOT_SUPPORTED;
         }

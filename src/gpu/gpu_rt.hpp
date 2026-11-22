@@ -35,6 +35,9 @@ typedef hipError_t  gpuError_t;
 #define gpuMallocAsync           hipMallocAsync
 #define gpuFreeAsync             hipFreeAsync
 #define gpuStreamSynchronize     hipStreamSynchronize
+#define gpuDevAttrCooperativeLaunch hipDeviceAttributeCooperativeLaunch
+#define gpuLaunchCooperativeKernel hipLaunchCooperativeKernel
+#define gpuOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
 #else
 #include <cuda_runtime.h>
 typedef cudaStream_t gpuStream_t;
@@ -59,6 +62,9 @@ typedef cudaError_t  gpuError_t;
 #define gpuMallocAsync           cudaMallocAsync
 #define gpuFreeAsync             cudaFreeAsync
 #define gpuStreamSynchronize     cudaStreamSynchronize
+#define gpuDevAttrCooperativeLaunch cudaDevAttrCooperativeLaunch
+#define gpuLaunchCooperativeKernel cudaLaunchCooperativeKernel
+#define gpuOccupancyMaxActiveBlocksPerMultiprocessor cudaOccupancyMaxActiveBlocksPerMultiprocessor
 #endif
 
 namespace omc {
@@ -96,12 +102,17 @@ struct LaunchArgs {
     size_t      ws_bytes;
     gpuStream_t stream;
     int         num_sms;
+    int         device;
+    /* OP_TRANSPOSE with OMC_SCALE_DYNAMIC_POW2: the amax pass is not run yet;
+     * one cooperative kernel computes it and converts (amax_out, scale_max) */
+    bool        fused_amax;
 };
 
 /* Workspace layout (32-bit words): [0] in-place ticket, [1] in-place done
- * count, [2] amax done count, [3] unused, [4, 4 + kMaxAmaxBlocks) amax
- * partials (need not be zero), then one in-place flag per chunk. Counters and
- * flags are zero between calls. */
+ * count, [2] amax done count (also the fused transpose's departures), [3]
+ * fused transpose's arrivals, [4, 4 + kMaxAmaxBlocks) amax partials (need not
+ * be zero), then one in-place flag per chunk. Counters and flags are zero
+ * between calls. */
 constexpr int    kThreads       = 256;
 constexpr int    kMaxAmaxBlocks = 1024;
 constexpr int    kFlagsOffset   = 4 + kMaxAmaxBlocks;
