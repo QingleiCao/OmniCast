@@ -1,0 +1,25 @@
+# histamine2 AMD EPYC 7302 16-Core Processor
+old inplace fp32>fp64 17.06 GB/s
+new inplace fp32>fp64 19.27 GB/s
+old inplace fp16>fp32 17.40 GB/s
+new inplace fp16>fp32 20.43 GB/s
+old inplace fp16>fp64 15.98 GB/s
+new inplace fp16>fp64 18.47 GB/s
+old inplace bf16>fp32 18.45 GB/s
+new inplace bf16>fp32 18.71 GB/s
+old inplace fp32>fp64 17.07 GB/s
+new inplace fp32>fp64 19.19 GB/s
+old inplace fp16>fp32 17.32 GB/s
+new inplace fp16>fp32 20.46 GB/s
+old inplace fp16>fp64 15.99 GB/s
+new inplace fp16>fp64 18.40 GB/s
+old inplace bf16>fp32 18.45 GB/s
+new inplace bf16>fp32 18.68 GB/s
+old inplace fp32>fp64 17.11 GB/s
+new inplace fp32>fp64 19.32 GB/s
+old inplace fp16>fp32 17.32 GB/s
+new inplace fp16>fp32 20.35 GB/s
+old inplace fp16>fp64 15.90 GB/s
+new inplace fp16>fp64 18.39 GB/s
+old inplace bf16>fp32 18.42 GB/s
+new inplace bf16>fp32 18.54 GB/s

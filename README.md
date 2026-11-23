@@ -1,266 +1,128 @@
 # OmniCast
-Universal data-type casting/conversion across all precisions, CPUs, and GPUs.
 
-## CPU (initial)
+Fast, exact data-type conversion on CPUs and GPUs (NVIDIA CUDA, AMD HIP), behind
+one C API.
 
-Current CPU implementation supports:
+| | |
+|---|---|
+| Types | FP64, FP32, FP16, BF16, FP8 E4M3 / E5M2 (OCP), signed and unsigned 8/16/32/64-bit integers — every pair |
+| Layouts | contiguous arrays; column-major matrices with leading dimensions; transposed output; zero-padded output |
+| Modes | every conversion with every option out of place **and in place** (single pass, also for strided matrices on the GPU), on the CPU, CUDA and HIP |
+| Rounding | nearest even (bit-identical to the CUDA conversion intrinsics); stochastic rounding (reproducible, independent of the thread decomposition); truncation for integers |
+| Extras | saturation, scaling by a host or device factor, dynamic power-of-two scaling from the amax (the FP8 recipe, also into integers), stochastic rounding of scaled values, amax |
+| CPU | AVX-512, AVX2+F16C, NEON, generic — chosen at run time |
+| GPU | CUDA (sm_70 and later) and HIP (gfx9 and later) from one source; asynchronous on a stream |
 
-- FP64 -> FP32
-- FP64 -> FP16
-- FP32 -> FP64
-- FP32 -> FP16
-- FP16 -> FP32
-- FP16 -> FP64
+Every conversion gives the same bits on every backend (NaN payloads aside):
+the scalar definition in `src/core/omc_scalar.hpp` is checked exhaustively
+against NVIDIA's reference conversions (all 2^32 FP32 inputs into FP16, BF16,
+E4M3 and E5M2, both saturation modes), and the SIMD and GPU kernels are checked
+against it for every type pair.
 
-## Build and run
-
-```bash
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
-./build/tests/test_casts_cpp
-```
-
-The library target is `omnicast_cpu` and is built from `src`.
-
-Builds are automatically tuned for the host CPU (`-march=native` / `-mtune=native` when supported), so install/build on each target machine for best performance.
-
-For heterogeneous clusters, build on each node type (or per CPU family image) so each deployment gets the right native tuning and instruction-set compatibility.
-
-### SIMD toggle
-
-CPU SIMD dispatch is enabled by default. On Intel/AMD x86 CPUs, runtime selection prefers the highest available backend automatically:
-
-- AVX512 + F16C
-- AVX2 + F16C
-- AVX + F16C
-- scalar fallback
-
-```bash
-cmake -S . -B build -DOMNICAST_ENABLE_CPU_SIMD=OFF
-```
-
-You can force scalar at runtime without rebuilding:
-
-```bash
-OMNICAST_FORCE_SCALAR=1 ./build/tests/test_casts_cpp
-```
-
-You can request SIMD at runtime for explicit testing:
-
-```bash
-OMNICAST_FORCE_SIMD=1 ./build/tests/test_casts_cpp
-```
-
-If both `OMNICAST_FORCE_SCALAR` and `OMNICAST_FORCE_SIMD` are set, scalar takes priority.
-
-### In-place conversion
-
-Use `convert_inplace(...)` for single-buffer conversion with safety checks:
-
-- shrinking (`FP64->FP32`, `FP64->FP16`, `FP32->FP16`) runs forward in-place
-- widening (`FP16->FP32`, `FP16->FP64`, `FP32->FP64`) runs backward in-place
-- returns `insufficient_capacity` if destination byte size exceeds provided capacity
-
-### C test
-
-A pure C test target is included:
-
-```bash
-ctest --test-dir build -R test_casts_c --output-on-failure
-./build/tests/test_casts_c
-```
-
-An additional C benchmark compares out-of-place+memcpy vs in-place:
-
-```bash
-ctest --test-dir build -R test_inplace_compare_c --output-on-failure
-./build/tests/test_inplace_compare_c --size 2097152
-```
-
-Enable relative FP64 error checking in either benchmark with:
-
-```bash
-./build/tests/test_casts_cpp --check 1
-./build/tests/test_casts_c --check 1
-```
-
-Toggle in-place checks/benchmark with:
-
-```bash
-./build/tests/test_casts_cpp --inplace 0
-./build/tests/test_casts_c --inplace 1
-```
-
-When `--inplace 1`, tests run in-place-only mode and benchmark all six conversion directions in-place.
-
-Control benchmark data size (number of elements) with:
-
-```bash
-./build/tests/test_casts_cpp --size 2097152
-./build/tests/test_casts_c --size 2097152
-```
-
-## NVIDIA CUDA backend
-
-CUDA device-pointer casting is now integrated and optional at build time. CPU APIs remain unchanged.
-GPU in-place conversion support has been removed; use distinct input/output device buffers for CUDA conversions.
-
-### Build with/without CUDA
-
-```bash
-# Default: tries CUDA, falls back to CPU-only if toolkit/compiler is missing.
-cmake -S . -B build
-
-# Force CPU-only build.
-cmake -S . -B build -DOMNICAST_ENABLE_CUDA=OFF
-
-# Override default datacenter architectures (defaults: 80;86;89;90).
-cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES="80;90"
-```
-
-### Reproducible GPU presets (auto-detect runtime tuning still applies)
-
-```bash
-# A100 (SM80)
-cmake --preset a100
-cmake --build --preset a100
-ctest --preset a100 -R test_gpu_casts_cpp
-
-# H100 (SM90)
-cmake --preset h100
-cmake --build --preset h100
-ctest --preset h100 -R test_gpu_casts_cpp
-
-# B100 workflow (default preset is toolchain-safe)
-cmake --preset b100
-cmake --build --preset b100
-ctest --preset b100 -R test_gpu_casts_cpp
-
-# When your CUDA toolkit supports Blackwell SM100:
-cmake --preset b100 -DCMAKE_CUDA_ARCHITECTURES=100
-```
-
-If a preset is run on a different GPU architecture than its target SM, `test_gpu_casts_cpp` now auto-skips to avoid false failures.
-
-### Supported GPU types
-
-- FP64 (`GpuDType::fp64`)
-- FP32 (`GpuDType::fp32`)
-- FP16 (`GpuDType::fp16`)
-- FP8 E4M3 (`GpuDType::fp8_e4m3`)
-- FP8 E5M2 (`GpuDType::fp8_e5m2`)
-
-FP8 paths are architecture-aware with runtime auto-detection:
-
-- A100 (SM80): `a100-fp8-emulated`
-- H100 (SM90): `h100-fp8-native`
-- B100-class (SM100+): `b100-fp8-native`
-- other GPUs: `cuda-fp8-native` or `cuda-fp8-emulated`
-
-### C++ device API example
-
-```cpp
-#include "omnicast/gpu_cast.hpp"
-
-// input/output are device pointers, stream is optional (nullptr for default stream).
-omnicast::GpuStatus st = omnicast::convert_device(
-    input_dev,
-    omnicast::GpuDType::fp64,
-    output_dev,
-    omnicast::GpuDType::fp8_e4m3,
-    count,
-    stream
-);
-```
-
-### C device API example
+## API
 
 ```c
-#include "omnicast/c_api.h"
+#include <omnicast/omnicast.h>
 
-omnicast_gpu_status st = omnicast_convert_device(
-    input_dev,
-    OMNICAST_GPU_DTYPE_FP32,
-    output_dev,
-    OMNICAST_GPU_DTYPE_FP16,
-    count,
-    (omnicast_cuda_stream)stream
-);
+/* host */
+omc_convert(OMC_FP64, x, OMC_FP16, h, n, NULL);                     /* 1-D */
+omc_convert_2d(OMC_FP32, A, lda, OMC_BF16, B, ldb, m, n, NULL);     /* matrix */
+omc_convert_inplace(OMC_FP64, OMC_FP32, buf, n, NULL);              /* in place */
+omc_convert(OMC_FP64, buf, OMC_FP32, buf, n, NULL);                  /* the same: dst == src */
+
+/* GPU: device pointers, asynchronous on the stream */
+omc_gpu_convert_2d(OMC_FP64, dA, lda, OMC_FP16, dB, ldb, m, n, NULL, stream);
+omc_gpu_convert_inplace(OMC_FP32, OMC_FP16, dC, n, NULL, stream);   /* one pass, no copy */
+omc_gpu_convert_inplace_2d(OMC_FP64, OMC_FP16, dT, ld, m, n, NULL, stream);  /* any ld >= m */
+
+/* options: a zero-initialized struct (or NULL) means the defaults */
+omc_options_t o = { .rounding = OMC_ROUND_STOCHASTIC, .seed = 42 };
+omc_gpu_convert_2d(OMC_FP64, dA, lda, OMC_FP32, dS, lds, m, n, &o, stream);
+
+/* FP8 operand of a cuBLASLt TN matmul: transposed, padded, scaled by a power of two */
+omc_options_t f8 = { .flags = OMC_FLAG_SATURATE | OMC_FLAG_TRANSPOSE,
+                     .dst_rows = 2048, .dst_cols = 2048,
+                     .scale_mode = OMC_SCALE_DYNAMIC_POW2, .scale_ptr = d_scale /* {amax, s, 1/s} */ };
+omc_gpu_convert_2d(OMC_FP32, dA, lda, OMC_FP8_E4M3, dA8, 2048, m, n, &f8, stream);
 ```
 
-### GPU tests and benchmarking
+All functions return an `omc_status_t`. The full reference is in
+[`include/omnicast/omnicast.h`](include/omnicast/omnicast.h).
+
+### Semantics
+
+- float → narrower float: round to nearest even. FP64 sources are rounded
+  once, directly to the target (no double rounding through FP32).
+- Overflow gives Inf (FP32, FP16, BF16, E5M2) or NaN (E4M3, which has no Inf);
+  `OMC_FLAG_SATURATE` gives the largest finite value instead (also for ±Inf).
+- float → integer: truncation (C cast) by default, nearest even with
+  `OMC_ROUND_NEAREST_EVEN`; always saturating; NaN → 0.
+- Stochastic rounding (`OMC_ROUND_STOCHASTIC`, float targets narrower than the
+  source): element (i, j) rounds down with probability (up − x)/(up − down),
+  with a uniform number hashed (SplitMix64) from (i, j), the seed and the bits of
+  x. Results are reproducible and identical on the CPU, CUDA and HIP. FP64 → FP32
+  and FP64/FP32 → FP16 are bit-compatible with HiCMA-X 0.2.
+- Scaling multiplies in the source's precision (FP64 for FP64 and 32/64-bit
+  integer sources, FP32 otherwise) and rounds the product before the
+  conversion, on every backend.
+- In place: the `_inplace` functions, or `dst == src`. Without transposition
+  or padding it is a single pass with no allocation; transposed or padded
+  results go through a temporary and a copy back.
+
+## Build
 
 ```bash
-ctest --test-dir build -R test_gpu_casts_cpp --output-on-failure
-./build/tests/test_gpu_casts_cpp --check 1 --size 1048576 --iters 50
+cmake -S . -B build -DOMNICAST_GPU_BACKEND=AUTO      # AUTO, CUDA, HIP or NONE
+cmake --build build -j
+ctest --test-dir build --output-on-failure          # -L exhaustive for the 2^32 sweep (CUDA)
 ```
 
-`test_gpu_casts_cpp` includes:
+Options: `CMAKE_CUDA_ARCHITECTURES` / `CMAKE_HIP_ARCHITECTURES`,
+`OMNICAST_BUILD_SHARED` (default static, position independent),
+`OMNICAST_OPENMP` (host threads for `num_threads > 1`),
+`OMNICAST_BUILD_TESTS`, `OMNICAST_BUILD_BENCHMARKS`, `OMNICAST_INSTALL`.
+Installed, `find_package(OmniCast)` gives `OmniCast::omnicast`, also to C
+projects: a static OmniCast enables C++ in the project that finds it, because
+the program links the C++ runtime (`tests/install_consumer` is such a C
+program; CI builds it against the installed package). As a subdirectory, link
+`omnicast`. `OMNICAST_CPU_ISA=avx2` (or `omc_cpu_set_isa`)
+forces a CPU code path. `OMNICAST_STREAM_BYTES` sets the destination size
+above which host conversions use streaming stores (0: never).
+`OMNICAST_FUSED_DYNAMIC=1` makes transposed GPU conversions with
+`OMC_SCALE_DYNAMIC_POW2` run as one cooperative kernel. That is faster when
+nothing else runs on the GPU, and slower beside kernels of other streams
+(`docs/REPORT.md`, section 5).
 
-- correctness checks with relative Frobenius norm `||A-A'||/||A||`
-- timing output in `ms/iteration`
-- CPU-vs-GPU A/B on FP32->FP16
-- FP8 E4M3 vs E5M2 error/performance comparison
-- configurable iteration count via `--iters N`
+## Design
 
-### Performance guidance
+- **One scalar definition** (`src/core/omc_scalar.hpp`, `__host__ __device__`):
+  small formats are encoded from FP32 by integer rounding of the bit pattern
+  (normals) and one FP32 addition of a power of two (subnormals); FP64 goes
+  through FP32 rounded to odd, which makes the second rounding exact. Written
+  branch-free so that compilers vectorize it.
+- **CPU**: the generic kernels are compiled once per instruction set
+  (baseline, AVX2+F16C, AVX-512) with the same source, and the hot pairs
+  (FP64↔FP32, FP32↔FP16, FP64↔FP16, FP64→BF16/FP8) use the hardware converts
+  (`vcvtps2ph`, `vcvtph2ps`, `vcvt[t]pd2ps` with embedded rounding). The table
+  is picked at start-up from CPUID. In place converts blocks through an
+  L1-sized buffer, front to back or back to front.
+- **GPU**: one source compiled by nvcc or hipcc, one translation unit per
+  source type. `k_cvt` gives each thread vectors of 16 bytes of the wider type
+  in striped rounds, so both sides are fully coalesced; transposition goes
+  through a 64×64 shared tile with 4-byte packed stores; in place is a single
+  pass where blocks take chunks in address order and wait (on flags in a small
+  per-stream workspace) only for the chunks their output overlaps.
+- **Tests**: exhaustive scalar checks against the CUDA host reference
+  conversions; every pair on every CPU code path; every pair on the GPU against
+  the host; 2-D, transposed, padded, in place (including 4 concurrent streams),
+  stochastic rounding against the HiCMA-X implementation, scaling.
 
-- Device APIs require device pointers; no hidden host-device copies are performed.
-- Use streams to overlap conversions with other GPU work.
-- For end-to-end transfer + kernel workflows, use pinned host memory for better H2D/D2H throughput.
-- Batch larger buffers to amortize launch overhead.
-- FP8 LUT remap mode can be overridden for A/B testing: `OMNICAST_FP8_LUT_MODE=x4|x16|auto` (default `auto`).
-- Legend conventions used in benchmark sections:
-  - `baseline`: denominator used for efficiency (`avg_eff = observed / baseline`)
-  - `reference`: correctness-oriented path used as semantic reference
-  - `recommended`: preferred high-performance paths for production
-  - `optional`: useful benchmark variants, but not preferred defaults
-  - `experimental`: available for study, not recommended as defaults
-  - `default`: `auto` policy used when no explicit implementation is forced
-- FP8 remap backend can be forced for benchmarking:
-  `OMNICAST_FP8_REMAP_IMPL=scalar|copy32|copy64|copy128|lut8_const|lut8_shared|lut32_u32|lut32_u64|lut32_u128|lut16|lutx16|auto`.
-  Uses the legend conventions above with baseline=`copy32|copy64|copy128`, reference=`scalar`,
-  default=`auto` (`lut32_u32`), optional=`lut32_u64|lut32_u128`,
-  experimental=`lut16|lut8_const|lutx16|lut8_shared` (`lut8_shared` currently slower).
-- FP16<->FP8 implementation can be selected with:
-  `OMNICAST_FP16_FP8_IMPL=scalar|native|packed|packed_wide|lut8_to_half|lut16_to_fp8|copyshape|auto`.
-  Uses the legend conventions above with baseline=`copyshape` (bytes-per-element=3), reference=`scalar`,
-  recommended=`native|packed`, optional=`packed_wide`, experimental=`lut8_to_half|lut16_to_fp8`,
-  default=`auto` (best validated path).
-  `auto` runs a one-time per-device microprobe and selects between `native|packed`.
-  In current A100 measurements, this reaches roughly 94-96% of the measured bytes-per-element=3 copy-shape baseline.
-  Set `OMNICAST_FP16_FP8_AUTOTUNE=0` to disable the microprobe and use static defaults.
-- FP32<->FP8 implementation can be selected with:
-  `OMNICAST_FP32_FP8_IMPL=scalar|native|packed|packed_wide|lut8_to_fp32|copyshape|auto`.
-  Uses the legend conventions above with baseline=`copyshape` (bytes-per-element=5), reference=`scalar`,
-  recommended=`native|packed`, optional=`packed_wide`, experimental=`lut8_to_fp32`,
-  default=`auto` (best validated path).
-  `auto` runs a one-time per-device microprobe and selects between `native|packed`.
-  In current A100 measurements, this reaches roughly 95% of the measured bytes-per-element=5 copy-shape baseline.
-  Set `OMNICAST_FP32_FP8_AUTOTUNE=0` to disable this microprobe.
-- For byte/narrow-type paths, FP64-derived memory-roof ratios can be misleading; use the dedicated FP8 remap packed-copy and FP16/FP32<->FP8 copy-shape baselines.
-- Current benchmark conclusion:
-  FP8<->FP8 `lut32_u32` is about 70-72% of the packed-copy baseline, while FP16<->FP8 and FP32<->FP8 `auto` are already near realistic streaming ceilings (~94-96% and ~95% respectively).
+`docs/REPORT.md` is the full report (design, profiling, performance);
+`docs/DESIGN.md` has the design details and `docs/PERFORMANCE.md` the
+measurement tables.
 
-### Environment examples
+## License
 
-```bash
-OMNICAST_FP8_REMAP_IMPL=auto ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP8_REMAP_IMPL=lut32_u32 ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP8_REMAP_IMPL=lut32_u64 ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP8_REMAP_IMPL=lut32_u128 ./build/tests/test_gpu_casts_cpp --check 1
-
-OMNICAST_FP16_FP8_IMPL=auto ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP16_FP8_IMPL=native ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP16_FP8_IMPL=packed ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP16_FP8_IMPL=packed_wide ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP16_FP8_IMPL=lut8_to_half ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP16_FP8_IMPL=lut16_to_fp8 ./build/tests/test_gpu_casts_cpp --check 1
-
-OMNICAST_FP32_FP8_IMPL=auto ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP32_FP8_IMPL=native ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP32_FP8_IMPL=packed ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP32_FP8_IMPL=packed_wide ./build/tests/test_gpu_casts_cpp --check 1
-OMNICAST_FP32_FP8_IMPL=lut8_to_fp32 ./build/tests/test_gpu_casts_cpp --check 1
-```
+BSD 3-Clause, see [`LICENSE`](LICENSE). The HiCMA-X 0.2 conversions that the
+tests and benchmarks compare against are HiCMA-X code and keep its copyright
+notice (same license).

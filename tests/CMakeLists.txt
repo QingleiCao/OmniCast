@@ -1,65 +1,61 @@
-add_executable(test_casts_cpp
-    test_casts.cpp
-)
+add_executable(omnicast_test_cpu test_cpu.cpp)
+target_link_libraries(omnicast_test_cpu PRIVATE omnicast)
+set_target_properties(omnicast_test_cpu PROPERTIES CXX_STANDARD 17)
+add_test(NAME omnicast_cpu COMMAND omnicast_test_cpu)
+# a parent project can add its own labels (HiCMA-X: hicma)
+set_tests_properties(omnicast_cpu PROPERTIES LABELS "omnicast;${OMNICAST_TEST_LABELS}")
 
-add_executable(test_casts_c
-    test_casts.c
-)
+# every pair x option set x layout, out of place / in place / dst == src
+add_executable(omnicast_test_modes test_modes.cpp)
+target_link_libraries(omnicast_test_modes PRIVATE omnicast)
+set_target_properties(omnicast_test_modes PROPERTIES CXX_STANDARD 17)
+add_test(NAME omnicast_modes COMMAND omnicast_test_modes)
+set_tests_properties(omnicast_modes PROPERTIES LABELS "omnicast;${OMNICAST_TEST_LABELS}")
 
-add_executable(test_inplace_compare_c
-    test_inplace_compare.c
-)
+if(OMNICAST_GPU STREQUAL "CUDA" OR OMNICAST_GPU STREQUAL "HIP")
+    add_executable(omnicast_test_gpu test_gpu.cu)
+    target_link_libraries(omnicast_test_gpu PRIVATE omnicast)
+    if(OMNICAST_GPU STREQUAL "HIP")
+        set_source_files_properties(test_gpu.cu PROPERTIES LANGUAGE HIP)
+        set_target_properties(omnicast_test_gpu PROPERTIES HIP_STANDARD 17)
+    else()
+        set_target_properties(omnicast_test_gpu PROPERTIES CUDA_STANDARD 17)
+    endif()
+    add_test(NAME omnicast_gpu COMMAND omnicast_test_gpu)
+    set_tests_properties(omnicast_gpu PROPERTIES LABELS "omnicast;gpu;${OMNICAST_TEST_LABELS}")
 
-if(OMNICAST_HAS_CUDA)
-    add_executable(test_gpu_casts_cpp
-        test_gpu_casts.cpp
-    )
-endif()
+    add_executable(omnicast_test_modes_gpu test_modes_gpu.cu)
+    target_link_libraries(omnicast_test_modes_gpu PRIVATE omnicast)
+    if(OMNICAST_GPU STREQUAL "HIP")
+        set_source_files_properties(test_modes_gpu.cu PROPERTIES LANGUAGE HIP)
+        set_target_properties(omnicast_test_modes_gpu PROPERTIES HIP_STANDARD 17)
+    else()
+        set_target_properties(omnicast_test_modes_gpu PROPERTIES CUDA_STANDARD 17)
+    endif()
+    add_test(NAME omnicast_modes_gpu COMMAND omnicast_test_modes_gpu)
+    set_tests_properties(omnicast_modes_gpu PROPERTIES LABELS "omnicast;gpu;${OMNICAST_TEST_LABELS}")
 
-target_link_libraries(test_casts_cpp
-    PRIVATE
-        omnicast_cpu
-)
-
-target_link_libraries(test_casts_c
-    PRIVATE
-        omnicast_cpu
-)
-
-target_link_libraries(test_inplace_compare_c
-    PRIVATE
-        omnicast_cpu
-)
-
-if(OMNICAST_HAS_CUDA)
-    target_link_libraries(test_gpu_casts_cpp
-        PRIVATE
-            omnicast_cpu
-            CUDA::cudart
-    )
-    target_compile_features(test_gpu_casts_cpp PRIVATE cxx_std_17)
-endif()
-
-target_compile_features(test_casts_cpp PRIVATE cxx_std_17)
-
-if(OMNICAST_INTERNAL_AUTO_NATIVE)
-    include(CheckCXXCompilerFlag)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-        check_cxx_compiler_flag("-march=native" OMNICAST_BENCH_HAS_MARCH_NATIVE)
-        check_cxx_compiler_flag("-mtune=native" OMNICAST_BENCH_HAS_MTUNE_NATIVE)
-
-        if(OMNICAST_BENCH_HAS_MARCH_NATIVE)
-            target_compile_options(test_casts_cpp PRIVATE $<$<NOT:$<CONFIG:Debug>>:-march=native>)
-        endif()
-        if(OMNICAST_BENCH_HAS_MTUNE_NATIVE)
-            target_compile_options(test_casts_cpp PRIVATE $<$<NOT:$<CONFIG:Debug>>:-mtune=native>)
-        endif()
+    if(OMNICAST_GPU STREQUAL "CUDA")
+        # sm_89+ hardware FP8 converts against the integer encoder (skipped below 8.9)
+        add_executable(omnicast_test_native_fp8 test_native_fp8.cu)
+        target_include_directories(omnicast_test_native_fp8 PRIVATE ${PROJECT_SOURCE_DIR}/include)
+        set_target_properties(omnicast_test_native_fp8 PROPERTIES CUDA_STANDARD 17)
+        target_compile_options(omnicast_test_native_fp8 PRIVATE -O3 --ftz=false --prec-div=true --fmad=false)
+        add_test(NAME omnicast_native_fp8 COMMAND omnicast_test_native_fp8)
+        set_tests_properties(omnicast_native_fp8 PROPERTIES LABELS "omnicast;gpu;${OMNICAST_TEST_LABELS}")
     endif()
 endif()
 
-add_test(NAME test_casts_cpp COMMAND test_casts_cpp)
-add_test(NAME test_casts_c COMMAND test_casts_c)
-add_test(NAME test_inplace_compare_c COMMAND test_inplace_compare_c)
-if(OMNICAST_HAS_CUDA)
-    add_test(NAME test_gpu_casts_cpp COMMAND test_gpu_casts_cpp)
+# Exhaustive check of the scalar core against the CUDA headers' host
+# reference conversions (needs only the CUDA include directory)
+if(OMNICAST_GPU STREQUAL "CUDA")
+    find_package(OpenMP COMPONENTS CXX)
+    add_executable(omnicast_test_exhaustive test_scalar_vs_cuda.cpp)
+    target_include_directories(omnicast_test_exhaustive PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    set_target_properties(omnicast_test_exhaustive PROPERTIES CXX_STANDARD 17)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(omnicast_test_exhaustive PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    add_test(NAME omnicast_exhaustive COMMAND omnicast_test_exhaustive)
+    set_tests_properties(omnicast_exhaustive PROPERTIES LABELS "omnicast;exhaustive")
 endif()

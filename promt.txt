@@ -1,4 +1,0 @@
-This is repo is about Universal data-type casting/conversion across all precisions, CPUs, and GPUs. Let's do CPU support first on FP64, FP32, and FP16: FP64->FP32, FP64->FP16, FP32->FP64, FP32->FP16, FP16->PF32, FP16->PF64. use CMAKE to configure. it needs to have src and tests. the test will test the time it spends. the src needs to build a library
-
-
-auto detect cpu type, intel, amd, arm, apple, etc. 

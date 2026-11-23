@@ -1,0 +1,53 @@
+# HiCMA-X with the final OmniCast on the H100 (hexane): GPU kernel time by class, Nsight Systems,
+# testing_potrf_tlr --N 32768 --NB 2048 --kind_of_problem 2 --gpus 1, one run per configuration, 2026-11-22
+
+k3_fp16acc: GPU kernel time 470.0 ms, OmniCast 38.27 ms (8.1 %)
+  GEMM                        293.19 ms  62.4 %    4400 launches
+  TRSM/SYRK/POTRF             138.54 ms  29.5 %    3856 launches
+  omc k_cvt                    33.37 ms   7.1 %    1003 launches
+  omc k_inplace                 4.90 ms   1.0 %     132 launches
+  other                         0.03 ms   0.0 %      16 launches
+
+k5_adapt_sr: GPU kernel time 583.7 ms, OmniCast 33.12 ms (5.7 %)
+  GEMM                        417.95 ms  71.6 %    4372 launches
+  TRSM/SYRK/POTRF             130.34 ms  22.3 %    3856 launches
+  omc k_cvt                    16.90 ms   2.9 %     408 launches
+  omc k_cvt sr                 16.22 ms   2.8 %     301 launches
+  other                         2.32 ms   0.4 %      44 launches
+
+k5_dtconv2: GPU kernel time 586.8 ms, OmniCast 28.68 ms (4.9 %)
+  GEMM                        422.73 ms  72.0 %    4372 launches
+  TRSM/SYRK/POTRF             132.92 ms  22.7 %    3856 launches
+  omc k_cvt                    28.68 ms   4.9 %     709 launches
+  other                         2.48 ms   0.4 %      44 launches
+
+k8_fp8: GPU kernel time 590.4 ms, OmniCast 29.97 ms (5.1 %)
+  GEMM                        426.27 ms  72.2 %    4372 launches
+  TRSM/SYRK/POTRF             132.19 ms  22.4 %    3856 launches
+  omc k_cvt                    27.86 ms   4.7 %     683 launches
+  other                         1.99 ms   0.3 %      44 launches
+  omc k_amax                    1.18 ms   0.2 %      26 launches
+  omc k_cvtT scaled             0.93 ms   0.2 %      26 launches
+
+k8_fp8_noscale: GPU kernel time 598.8 ms, OmniCast 28.76 ms (4.8 %)
+  GEMM                        430.15 ms  71.8 %    4372 launches
+  TRSM/SYRK/POTRF             138.04 ms  23.1 %    3856 launches
+  omc k_cvt                    27.82 ms   4.6 %     683 launches
+  other                         1.88 ms   0.3 %      44 launches
+  omc k_cvtT                    0.95 ms   0.2 %      26 launches
+
+k9_fp8sp: GPU kernel time 590.2 ms, OmniCast 3.27 ms (0.6 %)
+  GEMM                        464.25 ms  78.7 %    4372 launches
+  TRSM/SYRK/POTRF             120.75 ms  20.5 %    3856 launches
+  other                         1.95 ms   0.3 %      44 launches
+  omc k_amax                    1.17 ms   0.2 %      26 launches
+  omc k_cvtT scaled             1.11 ms   0.2 %      26 launches
+  omc k_cvt                     0.99 ms   0.2 %      30 launches
+
+# factorization time and tile precisions:
+k8_fp8: 0.83324 s; nb_dense_dp= 62 nb_dense_sp= 57 nb_dense_hp= 10 nb_dense_fp8= 7 nb_dense_dp= 62 nb_dense_sp= 57 nb_dense_hp= 10 nb_dense_fp8= 7 
+k9_fp8sp: 0.57090 s; nb_dense_dp= 0 nb_dense_sp= 119 nb_dense_hp= 10 nb_dense_fp8= 7 nb_dense_dp= 0 nb_dense_sp= 119 nb_dense_hp= 10 nb_dense_fp8= 7 
+k8_fp8_noscale: 0.64488 s; nb_dense_dp= 62 nb_dense_sp= 57 nb_dense_hp= 10 nb_dense_fp8= 7 nb_dense_dp= 62 nb_dense_sp= 57 nb_dense_hp= 10 nb_dense_fp8= 7 
+k5_adapt_sr: 0.71988 s; nb_dense_dp= 62 nb_dense_sp= 57 nb_dense_hp= 17 nb_dense_fp8= 0 nb_dense_dp= 62 nb_dense_sp= 57 nb_dense_hp= 17 nb_dense_fp8= 0 
+k5_dtconv2: 0.66470 s; nb_dense_dp= 62 nb_dense_sp= 57 nb_dense_hp= 17 nb_dense_fp8= 0 nb_dense_dp= 62 nb_dense_sp= 57 nb_dense_hp= 17 nb_dense_fp8= 0 
+k3_fp16acc: 0.59087 s; nb_dense_dp= 31 nb_dense_sp= 27 nb_dense_hp= 78 nb_dense_fp8= 0 nb_dense_dp= 31 nb_dense_sp= 27 nb_dense_hp= 78 nb_dense_fp8= 0 

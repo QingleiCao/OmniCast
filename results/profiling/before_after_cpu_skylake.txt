@@ -1,0 +1,56 @@
+avx512 before fp64>fp32 --sr 1.841 ns/element
+avx512 after fp64>fp32 --sr 1.839 ns/element
+avx512 before fp64>fp16 --sr 2.546 ns/element
+avx512 after fp64>fp16 --sr 1.922 ns/element
+avx512 before fp32>fp16 --sr 2.410 ns/element
+avx512 after fp32>fp16 --sr 1.495 ns/element
+avx512 before fp32>bf16 --sr 12.025 ns/element
+avx512 after fp32>bf16 --sr 1.279 ns/element
+avx512 before fp32>e4m3 --sr --sat 16.632 ns/element
+avx512 after fp32>e4m3 --sr --sat 1.309 ns/element
+avx512 before fp64>e4m3 --sr --sat 19.517 ns/element
+avx512 after fp64>e4m3 --sr --sat 2.280 ns/element
+avx512 before fp32>int8  0.223 ns/element
+avx512 after fp32>int8  0.160 ns/element
+avx512 before fp64>int32  0.443 ns/element
+avx512 after fp64>int32  0.454 ns/element
+avx512 before fp64>fp32  0.441 ns/element
+avx512 after fp64>fp32  0.441 ns/element
+avx512 before fp32>fp64  0.442 ns/element
+avx512 after fp32>fp64  0.437 ns/element
+avx512 before fp64>fp16  0.364 ns/element
+avx512 after fp64>fp16  0.367 ns/element
+avx512 before fp32>e4m3 --sat 0.212 ns/element
+avx512 after fp32>e4m3 --sat 0.219 ns/element
+avx512 before fp64>fp32 --inplace 0.359 ns/element
+avx512 after fp64>fp32 --inplace 0.342 ns/element
+avx512 before fp32>fp64 --inplace 0.351 ns/element
+avx512 after fp32>fp64 --inplace 0.358 ns/element
+avx2 before fp64>fp32 --sr 4.718 ns/element
+avx2 after fp64>fp32 --sr 4.389 ns/element
+avx2 before fp64>fp16 --sr 6.230 ns/element
+avx2 after fp64>fp16 --sr 5.613 ns/element
+avx2 before fp32>fp16 --sr 6.239 ns/element
+avx2 after fp32>fp16 --sr 3.407 ns/element
+avx2 before fp32>bf16 --sr 12.636 ns/element
+avx2 after fp32>bf16 --sr 2.473 ns/element
+avx2 before fp32>e4m3 --sr --sat 16.822 ns/element
+avx2 after fp32>e4m3 --sr --sat 2.886 ns/element
+avx2 before fp64>e4m3 --sr --sat 19.226 ns/element
+avx2 after fp64>e4m3 --sr --sat 5.987 ns/element
+avx2 before fp32>int8  0.159 ns/element
+avx2 after fp32>int8  0.154 ns/element
+avx2 before fp64>int32  0.458 ns/element
+avx2 after fp64>int32  0.463 ns/element
+avx2 before fp64>fp32  0.441 ns/element
+avx2 after fp64>fp32  0.444 ns/element
+avx2 before fp32>fp64  0.449 ns/element
+avx2 after fp32>fp64  0.442 ns/element
+avx2 before fp64>fp16  0.605 ns/element
+avx2 after fp64>fp16  0.604 ns/element
+avx2 before fp32>e4m3 --sat 0.437 ns/element
+avx2 after fp32>e4m3 --sat 0.435 ns/element
+avx2 before fp64>fp32 --inplace 0.352 ns/element
+avx2 after fp64>fp32 --inplace 0.346 ns/element
+avx2 before fp32>fp64 --inplace 0.355 ns/element
+avx2 after fp32>fp64 --inplace 0.354 ns/element

@@ -1,0 +1,40 @@
+
+## h100_final_nb2048.csv.gz  (nb = 2048)
+case             kernel                 us DRAM/min  DRAM%   SM% issue%  occ% regs inst/el L2hit  top stall reasons
+fp64>fp32        k_cvt                23.2     0.76   81.1  15.1   18.3  40.4   60    21.2  35.6  long_scoreboard, wait, selected
+fp32>fp64        k_cvt                19.3     0.55   70.1  19.6   25.6  39.4   54    23.0  68.9  long_scoreboard, wait, short_scoreboard
+fp32>fp16        k_cvt                12.2     0.67   68.0  16.2   20.9  30.6   71    11.9  36.9  long_scoreboard, wait, selected
+fp16>fp32        k_cvt                10.5     0.34   40.7  16.9   24.7  46.3   44    10.6  70.5  long_scoreboard, wait, short_scoreboard
+fp64>fp16        k_cvt                22.2     0.85   79.0  18.3   22.4  41.2   64    24.6  22.5  long_scoreboard, wait, short_scoreboard
+fp16>fp64        k_cvt                16.9     0.46   55.8  23.6   33.2  47.5   46    24.1  83.2  long_scoreboard, wait, short_scoreboard
+fp32>bf16        k_cvt                12.6     0.67   66.1  31.8   33.2  30.5   72    19.3  37.1  long_scoreboard, wait, selected
+fp64>bf16        k_cvt                22.6     0.86   78.3  28.6   34.7  31.3   80    39.2  22.4  long_scoreboard, wait, short_scoreboard
+fp32>e4m3        k_cvt                13.2     0.80   62.6  42.9   48.3  39.1   63    29.2  24.2  long_scoreboard, not_selected, math_pipe_throttle
+fp64>e4m3        k_cvt                22.2     0.93   78.1  32.2   38.5  31.7   71    42.1  13.7  long_scoreboard, wait, selected
+e4m3>fp32        k_cvt                11.0     0.21   19.5  24.7   35.6  40.5   52    16.3  83.3  long_scoreboard, short_scoreboard, wait
+fp32>int8        k_cvt                12.3     0.80   67.6  25.5   31.6  30.6   75    18.4  23.8  long_scoreboard, wait, selected
+int8>fp32        k_cvt                10.9     0.21   19.6  24.0   35.0  40.8   52    15.9  83.6  long_scoreboard, short_scoreboard, wait
+fp64>int32       k_cvt                23.3     0.76   80.7  22.0   26.8  41.1   56    31.1  35.6  long_scoreboard, wait, selected
+fp64>int64       k_cvt                26.5     0.67   83.7  20.4   25.1  39.6   60    32.8  51.7  long_scoreboard, wait, selected
+int64>fp64       k_cvt                27.2     0.68   81.8  16.1   20.4  39.9   57    26.5  51.8  long_scoreboard, wait, short_scoreboard
+SR_fp64>fp32     k_cvt sr             28.7     0.78   67.5  56.9   65.3  32.8   72    97.4  35.5  long_scoreboard, wait, not_selected
+SR_fp64>fp16     k_cvt sr             28.9     0.87   61.8  60.0   67.8  32.2   79   105.1  22.6  not_selected, long_scoreboard, math_pipe_throttle
+SR_fp32>fp16     k_cvt sr             26.2     0.67   31.6  72.0   66.0  43.9   62    94.4  37.2  not_selected, math_pipe_throttle, long_scoreboard
+SR_fp32>e4m3     k_cvt sr             26.7     0.80   31.0  70.0   67.2  43.3   64    98.5  24.1  not_selected, math_pipe_throttle, long_scoreboard
+T_fp32>e4m3      k_cvtT               16.4     0.80   50.6  49.2   60.0  44.3   64    49.2  29.1  long_scoreboard, wait, not_selected
+T_fp64>e4m3      k_cvtT               24.2     0.94   71.9  36.0   43.7  34.3   80    53.4  16.9  long_scoreboard, wait, short_scoreboard
+T_fp16>e4m3      k_cvtT               14.9     0.67   27.8  55.8   68.8  43.3   64    50.6  44.8  wait, not_selected, long_scoreboard
+T_fp64>fp32      k_cvtT               26.2     0.75   70.7  27.9   35.0  34.4   78    44.6  35.0  long_scoreboard, wait, barrier
+T_fp64>fp64      k_cvtT               30.6     0.68   73.2  29.5   36.2  34.2   80    55.1  51.6  long_scoreboard, wait, short_scoreboard
+TS_fp32>e4m3     k_amax               17.4     0.80   47.5  18.8   28.4  85.3   31    19.9  16.1  long_scoreboard, barrier, short_scoreboard
+TS_fp32>e4m3     k_cvtT scaled        17.0     0.80   48.8  49.6   60.0  44.3   64    51.5  29.1  long_scoreboard, wait, not_selected
+TS_fp64>e4m3     k_amax               27.7     0.92   61.6  17.2   23.9  88.4   23    29.1   8.8  long_scoreboard, barrier, wait
+TS_fp64>e4m3     k_cvtT scaled        25.6     0.94   68.0  35.4   42.5  34.8   72    55.4  16.8  long_scoreboard, wait, short_scoreboard
+IP_fp64>fp32     k_inplace            28.9     0.73   62.5  14.0   16.6  90.2   32    24.7  41.1  long_scoreboard, barrier, wait
+IP_fp32>fp64     k_inplace            27.5     0.55   49.4  16.6   20.8  68.8   40    27.9  70.6  barrier, long_scoreboard, wait
+IP_fp64>fp16     k_inplace            28.4     0.84   61.1  19.4   23.5  88.0   32    33.6  30.0  long_scoreboard, barrier, wait
+IP_fp32>fp16     k_inplace            17.9     0.67   46.1  11.6   14.4  55.5   46    12.6  42.1  long_scoreboard, barrier, wait
+IP_fp16>fp32     k_inplace            17.1     0.34   24.8  11.8   15.7  60.3   40    12.2  72.5  barrier, long_scoreboard, wait
+IPS_fp64>fp32    k_inplace            30.0     0.73   60.4  18.9   22.6  88.7   32    34.8  41.1  long_scoreboard, barrier, wait
+IPS_fp32>fp64    k_inplace            29.3     0.55   46.3  21.2   26.9  67.2   40    38.1  71.2  barrier, long_scoreboard, wait
+IPSR_fp64>fp32   k_inplace sr         34.9     0.73   51.9  53.1   61.1  56.7   46   112.4  43.7  long_scoreboard, barrier, not_selected

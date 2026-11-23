@@ -1,0 +1,11 @@
+OmniCast 2.0.0: every pair x 9 option sets x 6 layouts, out of place / in place / dst == src
+  generic  out of place   15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
+  generic  in place       15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
+  generic  dst == src     15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
+  avx2     out of place   15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
+  avx2     in place       15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
+  avx2     dst == src     15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
+  avx512   out of place   15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
+  avx512   in place       15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
+  avx512   dst == src     15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
+PASSED

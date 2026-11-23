@@ -1,0 +1,33 @@
+1/4 Test #1: omnicast_cpu .....................   Passed   11.98 sec
+2/4 Test #2: omnicast_modes ...................   Passed   52.56 sec
+3/4 Test #3: omnicast_gpu .....................   Passed    6.99 sec
+4/4 Test #4: omnicast_modes_gpu ...............   Passed   29.72 sec
+100% tests passed, 0 tests failed out of 4
+  scaling (host, device, dynamic power of two) and amax: ok
+  dynamic scale + transpose (float sources, RN/SR, NaN/inf, 4 concurrent streams): 144 cases
+PASSED
+# Radeon VII (gfx906), fp64 -> e4m3 transposed, dynamic scale, best of 20; fused=1: OMNICAST_FUSED_DYNAMIC=1
+fused=0 nb=1024 77.76 us
+fused=1 nb=1024 49.60 us
+fused=0 nb=2048 140.80 us
+fused=1 nb=2048 126.56 us
+fused=0 nb=4096 616.48 us
+fused=1 nb=4096 485.92 us
+fused=0 nb=8192 4180.79 us
+fused=1 nb=8192 2012.16 us
+fused=0 nb=1024 77.76 us
+fused=1 nb=1024 49.28 us
+fused=0 nb=2048 140.32 us
+fused=1 nb=2048 123.68 us
+fused=0 nb=4096 610.24 us
+fused=1 nb=4096 486.08 us
+fused=0 nb=8192 4246.71 us
+fused=1 nb=8192 1999.52 us
+fused=0 nb=1024 78.24 us
+fused=1 nb=1024 49.12 us
+fused=0 nb=2048 139.68 us
+fused=1 nb=2048 127.84 us
+fused=0 nb=4096 615.20 us
+fused=1 nb=4096 490.56 us
+fused=0 nb=8192 4242.24 us
+fused=1 nb=8192 2013.27 us
