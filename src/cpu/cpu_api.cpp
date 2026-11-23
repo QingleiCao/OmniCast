@@ -100,6 +100,46 @@ inline const Table &table() {
 
 /* ------------------------------------------------------------------------ */
 
+/** The host kernels assume the default floating-point environment: round to
+ *  nearest even, subnormals neither flushed to zero (FTZ) nor read as zero
+ *  (DAZ). Callers may run with other settings: the classic Intel compilers
+ *  turn FTZ on by default when optimizing, and BLAS-heavy codes set FTZ/DAZ
+ *  to avoid the cost of subnormals.
+ *  Every host entry point, and every OpenMP thread working for one, runs
+ *  under this guard, so results are the same bits whatever the caller's
+ *  settings. It costs one read of the control register when they are the
+ *  default. Status flags raised by the conversion are kept. */
+class FpEnvGuard {
+#if defined(__SSE2__)
+    static constexpr unsigned int kStatus = 0x3Fu;     /* MXCSR exception flags */
+    static constexpr unsigned int kDefault = 0x1F80u;  /* all masked, nearest, no FTZ/DAZ */
+    unsigned int saved_;
+    bool changed_;
+public:
+    FpEnvGuard() : saved_(_mm_getcsr()) {
+        const unsigned int want = kDefault | (saved_ & kStatus);
+        changed_ = saved_ != want;
+        if (changed_) _mm_setcsr(want);
+    }
+    ~FpEnvGuard() { if (changed_) _mm_setcsr(saved_ | (_mm_getcsr() & kStatus)); }
+#elif defined(__aarch64__)
+    /* FPCR: AHP (26), DN (25), FZ (24), RMode (23:22), FZ16 (19), trap enables (15, 12:8) */
+    static constexpr unsigned long kControl = (1ul << 26) | (1ul << 25) | (1ul << 24) | (3ul << 22) |
+                                              (1ul << 19) | (1ul << 15) | (0x1Ful << 8);
+    unsigned long saved_;
+    bool changed_;
+public:
+    FpEnvGuard() {
+        __asm__ __volatile__("mrs %0, fpcr" : "=r"(saved_));
+        changed_ = (saved_ & kControl) != 0;
+        if (changed_) { const unsigned long want = saved_ & ~kControl; __asm__ __volatile__("msr fpcr, %0" : : "r"(want)); }
+    }
+    ~FpEnvGuard() { if (changed_) __asm__ __volatile__("msr fpcr, %0" : : "r"(saved_)); }
+#endif
+    FpEnvGuard(const FpEnvGuard &) = delete;
+    FpEnvGuard &operator=(const FpEnvGuard &) = delete;
+};
+
 struct Plan {
     KFn fn;
     KParams p;
@@ -257,6 +297,7 @@ void run1d_threads(const Plan &pl, const char *s, char *d, size_t n, int nt) {
     const size_t chunk = ((n + nt - 1) / nt + 63) & ~(size_t)63;
     #pragma omp parallel for num_threads(nt) schedule(static)
     for (int t = 0; t < nt; t++) {
+        FpEnvGuard fpe;      /* each thread has its own floating-point environment */
         const size_t b = (size_t)t * chunk;
         if (b < n) {
             const size_t e = std::min(n, b + chunk);
@@ -447,6 +488,7 @@ omc_status_t omc_convert(omc_dtype_t st, const void *src, omc_dtype_t dt, void *
                          size_t count, const omc_options_t *opts) {
     if (count == 0) return OMC_SUCCESS;
     if (!src || !dst) return OMC_ERROR_INVALID_VALUE;
+    FpEnvGuard fpe;
     if (opts && (opts->flags & OMC_FLAG_TRANSPOSE)) return OMC_ERROR_INVALID_VALUE;
     if (src == dst) return omc_convert_inplace(st, dt, dst, count, opts);
     Plan pl;
@@ -459,6 +501,7 @@ omc_status_t omc_convert(omc_dtype_t st, const void *src, omc_dtype_t dt, void *
 omc_status_t omc_convert_2d(omc_dtype_t st, const void *src, int64_t lds,
                             omc_dtype_t dt, void *dst, int64_t ldd,
                             int64_t m, int64_t n, const omc_options_t *opts) {
+    FpEnvGuard fpe;
     Geom g;
     omc_status_t r = geometry(opts, m, n, g);
     if (r != OMC_SUCCESS) return r;
@@ -479,8 +522,10 @@ omc_status_t omc_convert_2d(omc_dtype_t st, const void *src, int64_t lds,
             } else {
                 const int nt = nthreads(opts, (size_t)m * n);
                 #pragma omp parallel for num_threads(nt) schedule(static) if (nt > 1)
-                for (int64_t j = 0; j < n; j++)
+                for (int64_t j = 0; j < n; j++) {
+                    FpEnvGuard fpe;
                     run1d(pl, s + (size_t)j * lds * pl.si, d + (size_t)j * ldd * pl.so, (size_t)m, 0, (uint32_t)j);
+                }
             }
         } else {
             const int64_t nbj = (n + TB - 1) / TB;
@@ -489,6 +534,7 @@ omc_status_t omc_convert_2d(omc_dtype_t st, const void *src, int64_t lds,
             #pragma omp parallel for num_threads(nt) schedule(static) collapse(2) if (nt > 1)
             for (int64_t bj = 0; bj < nbj; bj++)
                 for (int64_t bi = 0; bi < nbi; bi++) {
+                    FpEnvGuard fpe;
                     const int64_t i0 = bi * TB, j0 = bj * TB;
                     transpose_block(pl, s, lds, d, ldd, i0, j0,
                                     (int)std::min<int64_t>(TB, m - i0), (int)std::min<int64_t>(TB, n - j0));
@@ -503,6 +549,7 @@ omc_status_t omc_convert_inplace(omc_dtype_t st, omc_dtype_t dt, void *buf, size
                                  const omc_options_t *opts) {
     if (count == 0) return OMC_SUCCESS;
     if (!buf) return OMC_ERROR_INVALID_VALUE;
+    FpEnvGuard fpe;
     if (opts && (opts->flags & OMC_FLAG_TRANSPOSE)) return OMC_ERROR_INVALID_VALUE;
     Plan pl;
     omc_status_t r = make_plan(st, dt, opts, pl, buf, (int64_t)count, (int64_t)count, 1);
@@ -514,6 +561,7 @@ omc_status_t omc_convert_inplace(omc_dtype_t st, omc_dtype_t dt, void *buf, size
 
 omc_status_t omc_convert_inplace_2d(omc_dtype_t st, omc_dtype_t dt, void *buf, int64_t ld,
                                     int64_t m, int64_t n, const omc_options_t *opts) {
+    FpEnvGuard fpe;
     return inplace_2d(st, dt, buf, ld, ld, m, n, opts);
 }
 
@@ -521,6 +569,7 @@ omc_status_t omc_amax_2d(omc_dtype_t type, const void *src, int64_t ld, int64_t 
     if ((unsigned)type >= OMC_NUM_DTYPES || !amax || m < 0 || n < 0 || (m > 0 && ld < m))
         return OMC_ERROR_INVALID_VALUE;
     *amax = 0.0;
+    FpEnvGuard fpe;
     const AmaxFn f = table().amax[type];
     if (!f) return OMC_ERROR_NOT_SUPPORTED;
     if (m == 0 || n == 0) return OMC_SUCCESS;
@@ -542,17 +591,17 @@ omc_status_t omc_convert_scalar(omc_dtype_t st, const void *src, omc_dtype_t dt,
 }
 
 /* Scalars */
-uint16_t omc_fp32_to_fp16(float x)  { return (uint16_t)enc_f32<FmtF16>(x, false); }
-uint16_t omc_fp64_to_fp16(double x) { return (uint16_t)enc_f32<FmtF16>(f64_to_f32_ro(x), false); }
-float    omc_fp16_to_fp32(uint16_t h) { return dec_f32<FmtF16>(h); }
-uint16_t omc_fp32_to_bf16(float x)  { return (uint16_t)enc_f32<FmtBF16>(x, false); }
-uint16_t omc_fp64_to_bf16(double x) { return (uint16_t)enc_f32<FmtBF16>(f64_to_f32_ro(x), false); }
-float    omc_bf16_to_fp32(uint16_t h) { return dec_f32<FmtBF16>(h); }
-uint8_t  omc_fp32_to_e4m3(float x, int sat)  { return (uint8_t)enc_f32<FmtE4M3>(x, sat != 0); }
-uint8_t  omc_fp64_to_e4m3(double x, int sat) { return (uint8_t)enc_f32<FmtE4M3>(f64_to_f32_ro(x), sat != 0); }
-float    omc_e4m3_to_fp32(uint8_t h) { return dec_f32<FmtE4M3>(h); }
-uint8_t  omc_fp32_to_e5m2(float x, int sat)  { return (uint8_t)enc_f32<FmtE5M2>(x, sat != 0); }
-uint8_t  omc_fp64_to_e5m2(double x, int sat) { return (uint8_t)enc_f32<FmtE5M2>(f64_to_f32_ro(x), sat != 0); }
-float    omc_e5m2_to_fp32(uint8_t h) { return dec_f32<FmtE5M2>(h); }
+uint16_t omc_fp32_to_fp16(float x) { FpEnvGuard fpe; return (uint16_t)enc_f32<FmtF16>(x, false); }
+uint16_t omc_fp64_to_fp16(double x) { FpEnvGuard fpe; return (uint16_t)enc_f32<FmtF16>(f64_to_f32_ro(x), false); }
+float    omc_fp16_to_fp32(uint16_t h) { FpEnvGuard fpe; return dec_f32<FmtF16>(h); }
+uint16_t omc_fp32_to_bf16(float x) { FpEnvGuard fpe; return (uint16_t)enc_f32<FmtBF16>(x, false); }
+uint16_t omc_fp64_to_bf16(double x) { FpEnvGuard fpe; return (uint16_t)enc_f32<FmtBF16>(f64_to_f32_ro(x), false); }
+float    omc_bf16_to_fp32(uint16_t h) { FpEnvGuard fpe; return dec_f32<FmtBF16>(h); }
+uint8_t  omc_fp32_to_e4m3(float x, int sat) { FpEnvGuard fpe; return (uint8_t)enc_f32<FmtE4M3>(x, sat != 0); }
+uint8_t  omc_fp64_to_e4m3(double x, int sat) { FpEnvGuard fpe; return (uint8_t)enc_f32<FmtE4M3>(f64_to_f32_ro(x), sat != 0); }
+float    omc_e4m3_to_fp32(uint8_t h) { FpEnvGuard fpe; return dec_f32<FmtE4M3>(h); }
+uint8_t  omc_fp32_to_e5m2(float x, int sat) { FpEnvGuard fpe; return (uint8_t)enc_f32<FmtE5M2>(x, sat != 0); }
+uint8_t  omc_fp64_to_e5m2(double x, int sat) { FpEnvGuard fpe; return (uint8_t)enc_f32<FmtE5M2>(f64_to_f32_ro(x), sat != 0); }
+float    omc_e5m2_to_fp32(uint8_t h) { FpEnvGuard fpe; return dec_f32<FmtE5M2>(h); }
 
 } /* extern "C" */

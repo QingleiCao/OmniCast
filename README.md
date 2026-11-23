@@ -68,6 +68,12 @@ All functions return an `omc_status_t`. The full reference is in
 - In place: the `_inplace` functions, or `dst == src`. Without transposition
   or padding it is a single pass with no allocation; transposed or padded
   results go through a temporary and a copy back.
+- The caller's floating-point environment does not matter. Host conversions
+  run with round to nearest and IEEE subnormals even when the calling thread
+  (or the OpenMP threads OmniCast uses) has flush-to-zero, denormals-are-zero
+  or another rounding mode set, as optimizing Intel compilers and BLAS-heavy
+  codes often do (x86-64 MXCSR, AArch64 FPCR). The caller's settings are
+  restored on return. GPU kernels are built without flush-to-zero.
 
 ## Build
 
