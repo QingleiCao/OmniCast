@@ -504,6 +504,113 @@ static void test_fp8_encoders(const char *isa) {
     printf("  [%s] FP8 encoders: %ld values checked\n", isa, checked);
 }
 
+/* Results must not depend on the caller's floating-point environment: run
+ * each case in the default environment, then with FTZ, DAZ and rounding
+ * toward zero set in this thread and in the OpenMP threads, and compare the
+ * bits. */
+#if defined(__SSE2__)
+#include <xmmintrin.h>
+static void set_fp_env(unsigned int csr) {
+    _mm_setcsr(csr);
+#if defined(_OPENMP)
+    #pragma omp parallel num_threads(8)
+    _mm_setcsr(csr);
+#endif
+}
+
+static void test_fp_env() {
+    const unsigned int def = 0x1F80u, hostile = 0x1F80u | 0x8000u | 0x0040u | 0x6000u;  /* FTZ, DAZ, toward zero */
+    std::mt19937_64 g(7);
+    /* values around the FP32 / BF16 subnormal range, FP16/FP8 halfway cases and ordinary numbers */
+    const size_t N = 200000;   /* enough for 4 OpenMP threads (32K elements each) */
+    std::vector<double> d(N);
+    std::vector<float> f(N);
+    for (size_t i = 0; i < N; i++) {
+        const int e = (int)(g() % 7);
+        const double u = std::ldexp((double)(g() >> 11), -53) * ((g() & 1) ? 1 : -1);
+        d[i] = e == 0 ? u * 0x1p-127 : e == 1 ? u * 0x1p-140 : e == 2 ? u * 0x1p-14 : e == 3 ? u * 0x1p-20 : u * 300.0;
+        uint32_t b = (uint32_t)g();
+        if (e < 2) b &= 0x807FFFFFu;          /* FP32 subnormal sources */
+        memcpy(&f[i], &b, 4);
+        if (std::isnan(f[i])) f[i] = 1.0f;
+    }
+    struct Case { omc_dtype_t st, dt; int opt; };
+    const Case cases[] = {
+        {OMC_FP64, OMC_FP32, 0}, {OMC_FP64, OMC_FP32, 1}, {OMC_FP64, OMC_FP32, 2}, {OMC_FP64, OMC_FP16, 0},
+        {OMC_FP64, OMC_FP16, 1}, {OMC_FP64, OMC_BF16, 0}, {OMC_FP64, OMC_FP8_E4M3, 3}, {OMC_FP64, OMC_FP8_E5M2, 4},
+        {OMC_FP64, OMC_INT32, 5}, {OMC_FP32, OMC_FP64, 0}, {OMC_FP32, OMC_BF16, 0}, {OMC_FP32, OMC_FP16, 2},
+        {OMC_FP32, OMC_FP8_E4M3, 4}, {OMC_FP32, OMC_INT16, 5},
+    };
+    long checked = 0;
+    for (const char *isa : {"generic", "avx2", "avx512"}) {
+        if (omc_cpu_set_isa(isa) != 0) continue;
+        for (const Case &c : cases) {
+            for (int layout = 0; layout < 5; layout++) {   /* 1-D, 1-D threads, 2-D ld, 2-D transposed, in place */
+                omc_options_t o;
+                memset(&o, 0, sizeof o);
+                if (c.opt == 1) { o.scale_mode = OMC_SCALE_HOST; o.scale = 0.3f; }
+                if (c.opt == 2) { o.rounding = OMC_ROUND_STOCHASTIC; o.seed = 11; }
+                if (c.opt == 3) { o.flags = OMC_FLAG_SATURATE; o.scale_mode = OMC_SCALE_HOST; o.scale = 1e30f; }
+                if (c.opt == 4) { static float sc[3]; o.flags = OMC_FLAG_SATURATE; o.scale_mode = OMC_SCALE_DYNAMIC_POW2; o.scale_ptr = sc; }
+                if (c.opt == 5) o.rounding = OMC_ROUND_NEAREST_EVEN;
+                const void *src = (c.st == OMC_FP64) ? (const void *)d.data() : (const void *)f.data();
+                const size_t ss = omc_dtype_size(c.st), ds = omc_dtype_size(c.dt);
+                const int64_t m = 300, ld = 317, n = (int64_t)(N / ld);
+                std::vector<unsigned char> out[2];
+                for (int pass = 0; pass < 2; pass++) {
+                    std::vector<unsigned char> &r = out[pass];
+                    r.assign(N * std::max(ss, ds), 0);
+                    set_fp_env(pass ? hostile : def);
+                    omc_status_t st = OMC_SUCCESS;
+                    switch (layout) {
+                    case 0: st = omc_convert(c.st, src, c.dt, r.data(), 4096, &o); break;
+                    case 1: o.num_threads = 4; st = omc_convert(c.st, src, c.dt, r.data(), N, &o); break;
+                    case 2: o.num_threads = 4; st = omc_convert_2d(c.st, src, ld, c.dt, r.data(), ld, m, n, &o); break;
+                    case 3: { omc_options_t t = o; t.flags |= OMC_FLAG_TRANSPOSE; t.num_threads = 4;
+                              st = omc_convert_2d(c.st, src, ld, c.dt, r.data(), n, m, n, &t); break; }
+                    case 4: memcpy(r.data(), src, N * ss);
+                            st = omc_convert_inplace_2d(c.st, c.dt, r.data(), ld, m, n, &o); break;
+                    }
+                    set_fp_env(def);
+                    if (st == OMC_ERROR_NOT_SUPPORTED) break;
+                    CHECK(st == OMC_SUCCESS, "[%s] fp env %s->%s layout %d status %d", isa,
+                          omc_dtype_name(c.st), omc_dtype_name(c.dt), layout, st);
+                }
+                if (out[1].empty() || out[0].size() != out[1].size()) continue;
+                const bool same_bits = memcmp(out[0].data(), out[1].data(), out[0].size()) == 0;
+                CHECK(same_bits, "[%s] %s->%s option %d layout %d: results change with FTZ/DAZ/rounding mode", isa,
+                      omc_dtype_name(c.st), omc_dtype_name(c.dt), c.opt, layout);
+                checked++;
+            }
+        }
+        /* amax of a subnormal-only array */
+        double a[2];
+        for (int pass = 0; pass < 2; pass++) {
+            set_fp_env(pass ? hostile : def);
+            omc_amax_2d(OMC_FP32, f.data(), 64, 64, 1, &a[pass]);
+            set_fp_env(def);
+        }
+        CHECK(a[0] == a[1], "[%s] amax changes with FTZ/DAZ: %a vs %a", isa, a[0], a[1]);
+    }
+    /* scalars */
+    for (size_t i = 0; i < 4096; i++) {
+        uint32_t r0[6], r1[6];
+        for (int pass = 0; pass < 2; pass++) {
+            uint32_t *r = pass ? r1 : r0;
+            set_fp_env(pass ? hostile : def);
+            r[0] = omc_fp64_to_bf16(d[i]); r[1] = omc_fp32_to_bf16(f[i]); r[2] = omc_fp64_to_fp16(d[i]);
+            r[3] = omc_fp64_to_e4m3(d[i], 1); r[4] = omc_fp32_to_e5m2(f[i], 0);
+            const float x = omc_bf16_to_fp32((uint16_t)r[1]); memcpy(&r[5], &x, 4);
+            set_fp_env(def);
+        }
+        CHECK(!memcmp(r0, r1, sizeof r0), "scalar conversions of %a / %a change with FTZ/DAZ", d[i], (double)f[i]);
+    }
+    printf("  floating-point environment (FTZ, DAZ, toward zero; caller and OpenMP threads): %ld cases\n", checked);
+}
+#else
+static void test_fp_env() {}
+#endif
+
 int main() {
     reg_all();
     const char *isa0 = omc_cpu_isa();
@@ -516,6 +623,7 @@ int main() {
     test_2d();
     test_inplace();
     test_misc();
+    test_fp_env();
     printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;
 }

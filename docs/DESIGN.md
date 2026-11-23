@@ -240,12 +240,27 @@ instantiations compile in parallel (35 s per architecture on 32 cores).
   sign. FP64 sources go through FP32 rounded to odd first, as on the host.
   `omnicast_native_fp8` checks all 2^32 FP32 inputs on the GPU.
 
+- Floating-point environment: the kernels assume round to nearest and IEEE
+  subnormals. Under flush-to-zero / denormals-are-zero (MXCSR bits 15 and 6)
+  `vcvtpd2ps` flushes subnormal results and the FP32 additions of the
+  small-format encoders read subnormal inputs as zero; under another rounding
+  mode the AVX2 converts round differently. Every host entry point therefore
+  runs under `FpEnvGuard` (`cpu_api.cpp`), which installs the default MXCSR
+  (AArch64: clears FPCR.FZ/FZ16/RMode/DN/AHP and the trap enables) for the
+  call and restores the caller's, keeping the status flags. OpenMP threads
+  have their own control register, so each thread body takes a guard too. The
+  cost is one `stmxcsr` per call (and per column or 64×64 block in threaded
+  2-D calls) when the environment is already the default. Found with
+  HiCMA-X, which sets FTZ/DAZ on its CPU threads (subnormal FP32 tiles cost
+  microcode assists in MKL's SGEMM): without the guard, 803 checks of
+  `omnicast_cpu` and 288 of `omnicast_modes` changed under FTZ/DAZ.
+
 ## Testing
 
 | Test | What |
 |---|---|
 | `omnicast_exhaustive` | all 2^32 FP32 inputs → FP16/BF16/E4M3/E5M2, both saturation modes, against the CUDA headers; all codes → FP32; FP64 edge cases and 4M random values against an exact reference |
-| `omnicast_cpu` | every pair × 3 option sets × lengths 1..4099 (tails, misalignment) on every CPU path against the scalar core; stochastic rounding against HiCMA-X 0.2; 720 2-D/transposed/padded cases; in place for every pair (1-D and 2-D with ld > m); scaling, amax, threads, errors; the SIMD FP8 encoders on every 47th FP32 pattern (`OMNICAST_TEST_FP8_STRIDE=1`: all), every FP16/BF16 pattern and FP64 edge values |
+| `omnicast_cpu` | every pair × 3 option sets × lengths 1..4099 (tails, misalignment) on every CPU path against the scalar core; stochastic rounding against HiCMA-X 0.2; 720 2-D/transposed/padded cases; in place for every pair (1-D and 2-D with ld > m); scaling, amax, threads, errors; 210 cases (14 pairs and option sets × 5 layouts × each CPU path), amax and the scalar functions computed again with FTZ, DAZ and rounding toward zero set in the caller and in the OpenMP threads, bit for bit; the SIMD FP8 encoders on every 47th FP32 pattern (`OMNICAST_TEST_FP8_STRIDE=1`: all), every FP16/BF16 pattern and FP64 edge values |
 | `omnicast_gpu` | every pair × 2 option sets × aligned/misaligned against the host; 896 2-D/transposed/padded/stochastic cases; in place for every pair up to 10^6 elements, 4 concurrent streams × 20 calls; dynamic and device scaling; 144 fused dynamic-scale transposed cases (float sources, nearest and stochastic, NaN/infinity, 1 to many tiles per block) and 4 concurrent streams × 8 calls with a different scale each |
 | `omnicast_native_fp8` | CUDA, sm_89+: the hardware FP8 encode against the integer encoder on all 2^32 FP32 inputs (E4M3, E5M2) and 2^30 FP64 values |
 | `omnicast_modes`, `omnicast_modes_gpu` | every pair × 9 option sets (default, saturate, nearest, host scale, device scale, dynamic scale, stochastic, stochastic + scale, stochastic + dynamic) × 6 layouts (1-D, 2-D, ld > m, transposed, padded, both) × {out of place, in place, dst == src}, small odd and multi-chunk sizes, aligned and not: 15288 calls per mode, against the generic host conversion, on every host code path and on the GPU |

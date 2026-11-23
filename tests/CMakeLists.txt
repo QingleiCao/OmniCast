@@ -1,6 +1,10 @@
 add_executable(omnicast_test_cpu test_cpu.cpp)
 target_link_libraries(omnicast_test_cpu PRIVATE omnicast)
 set_target_properties(omnicast_test_cpu PROPERTIES CXX_STANDARD 17)
+# OpenMP in the test too, to set the floating-point environment of the threads OmniCast uses
+if(TARGET OpenMP::OpenMP_CXX)
+    target_link_libraries(omnicast_test_cpu PRIVATE OpenMP::OpenMP_CXX)
+endif()
 add_test(NAME omnicast_cpu COMMAND omnicast_test_cpu)
 # a parent project can add its own labels (HiCMA-X: hicma)
 set_tests_properties(omnicast_cpu PROPERTIES LABELS "omnicast;${OMNICAST_TEST_LABELS}")
