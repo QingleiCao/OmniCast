@@ -41,7 +41,7 @@
 
 #define OMNICAST_VERSION_MAJOR 2
 #define OMNICAST_VERSION_MINOR 1
-#define OMNICAST_VERSION_PATCH 0
+#define OMNICAST_VERSION_PATCH 1
 
 #ifdef __cplusplus
 extern "C" {
