@@ -40,7 +40,7 @@
 #include <stdint.h>
 
 #define OMNICAST_VERSION_MAJOR 2
-#define OMNICAST_VERSION_MINOR 0
+#define OMNICAST_VERSION_MINOR 1
 #define OMNICAST_VERSION_PATCH 0
 
 #ifdef __cplusplus
@@ -132,7 +132,8 @@ const char *omc_status_string(omc_status_t s);
  *  name and description, for instance
  *  "launch of k_cvt: cudaErrorLaunchOutOfResources (too many resources
  *  requested for launch)". "" until such an error occurs. Successful calls
- *  leave it as it is, so read it right after the call that failed. */
+ *  leave it as it is, so read it right after the call that failed.
+ *  Since 2.1.0. */
 const char *omc_last_error_detail(void);
 const char *omc_version_string(void);
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(OmniCast VERSION 2.0.1 LANGUAGES C CXX)
+project(OmniCast VERSION 2.1.0 LANGUAGES C CXX)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     set(_omc_top ON)
