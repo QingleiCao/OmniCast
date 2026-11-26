@@ -33,10 +33,14 @@ namespace {
  *  already pending on the thread (from an earlier runtime call whose error
  *  nobody read) would otherwise come back from check_launch as a failure of
  *  OmniCast's own launch. It is reported as what it is, OMC_ERROR_DEVICE with
- *  nothing launched, and left pending for the code that caused it. */
+ *  nothing launched, and left pending for the code that caused it.
+ *  "Not ready" is not an error. HIP (ROCm 6) keeps the status of its last call
+ *  as the last error, successes included: after an event or stream query of
+ *  unfinished work, as a runtime system polls, it is hipErrorNotReady. CUDA
+ *  does not record cudaErrorNotReady. */
 omc_status_t check_pending() {
     const gpuError_t e = gpuPeekAtLastError();
-    if (e == gpuSuccess) return OMC_SUCCESS;
+    if (e == gpuSuccess || e == gpuErrorNotReady) return OMC_SUCCESS;
     set_error_detail("pending before the call, from an earlier runtime call (left pending): %s (%s)",
                      gpuGetErrorName(e), gpuGetErrorString(e));
     return OMC_ERROR_DEVICE;

@@ -31,6 +31,12 @@
 #define gPeekAtLastError hipPeekAtLastError
 #define gGetErrorName hipGetErrorName
 #define gSuccess hipSuccess
+#define gErrorNotReady hipErrorNotReady
+#define gEvent_t hipEvent_t
+#define gEventCreate hipEventCreate
+#define gEventDestroy hipEventDestroy
+#define gEventRecord hipEventRecord
+#define gEventQuery hipEventQuery
 typedef hipError_t gError_t;
 typedef hipDeviceProp_t gProp;
 #else
@@ -51,6 +57,12 @@ typedef hipDeviceProp_t gProp;
 #define gPeekAtLastError cudaPeekAtLastError
 #define gGetErrorName cudaGetErrorName
 #define gSuccess cudaSuccess
+#define gErrorNotReady cudaErrorNotReady
+#define gEvent_t cudaEvent_t
+#define gEventCreate cudaEventCreate
+#define gEventDestroy cudaEventDestroy
+#define gEventRecord cudaEventRecord
+#define gEventQuery cudaEventQuery
 typedef cudaError_t gError_t;
 typedef cudaDeviceProp gProp;
 #endif
@@ -388,6 +400,24 @@ static void test_dynamic_transpose() {
  * every entry point, nothing is launched and the error stays pending; a
  * failed allocation names the call and its error and is read (not left
  * pending); a call after clearing works. */
+/** Keeps a stream busy for about `cycles` GPU clock cycles */
+__global__ void k_spin(long long cycles) {
+    const long long t0 = clock64();
+    while (clock64() - t0 < cycles) {}
+}
+
+/** One of the five GPU entry points on n FP32 values of a (into b, or b in place) */
+static omc_status_t call_entry(int entry, void *a, void *b, void *am, size_t n) {
+    const omc_dtype_t F32 = OMC_FP32, F16 = OMC_FP16;
+    switch (entry) {
+    case 0: return omc_gpu_convert(F32, a, F16, b, n, nullptr, nullptr);
+    case 1: return omc_gpu_convert_2d(F32, a, 64, F16, b, 64, 64, (int64_t)n / 64, nullptr, nullptr);
+    case 2: return omc_gpu_convert_inplace(F32, F16, b, n, nullptr, nullptr);
+    case 3: return omc_gpu_convert_inplace_2d(F32, F16, b, 64, 64, (int64_t)n / 64, nullptr, nullptr);
+    default: return omc_gpu_amax_2d(F32, a, 64, 64, (int64_t)n / 64, (float *)am, nullptr);
+    }
+}
+
 static void test_errors() {
     const size_t n = 4096;
     DBuf a(n * 8), b(n * 8), am(16);
@@ -401,14 +431,7 @@ static void test_errors() {
         const gError_t e0 = gMalloc(&huge, (size_t)1 << 60);    /* fails, leaves its error pending */
         CHECK(e0 != gSuccess, "entry %d: allocating 2^60 bytes succeeded", entry);
         if (e0 == gSuccess) { gFree(huge); continue; }
-        omc_status_t r = OMC_SUCCESS;
-        switch (entry) {
-        case 0: r = omc_gpu_convert(F32, a.p, F16, b.p, n, nullptr, nullptr); break;
-        case 1: r = omc_gpu_convert_2d(F32, a.p, 64, F16, b.p, 64, 64, (int64_t)n / 64, nullptr, nullptr); break;
-        case 2: r = omc_gpu_convert_inplace(F32, F16, b.p, n, nullptr, nullptr); break;
-        case 3: r = omc_gpu_convert_inplace_2d(F32, F16, b.p, 64, 64, (int64_t)n / 64, nullptr, nullptr); break;
-        case 4: r = omc_gpu_amax_2d(F32, a.p, 64, 64, (int64_t)n / 64, (float *)am.p, nullptr); break;
-        }
+        const omc_status_t r = call_entry(entry, a.p, b.p, am.p, n);
         const char *d = omc_last_error_detail();
         CHECK(r == OMC_ERROR_DEVICE, "entry %d with a pending error: %s", entry, omc_status_string(r));
         CHECK(strstr(d, gGetErrorName(e0)) && strstr(d, "pending before the call"), "entry %d: detail \"%s\"", entry, d);
@@ -427,6 +450,35 @@ static void test_errors() {
     CHECK(r == OMC_SUCCESS, "after clearing: %s (%s)", omc_status_string(r), omc_last_error_detail());
     gMemcpy(b16.data(), b.p, n * 2, gD2H);
     CHECK(b16[0] == 0x3e00 && b16[n - 1] == 0x3e00, "after clearing: 1.5 -> 0x%04x", b16[0]);
+    /* "not ready" from a query of unfinished work, as a runtime system polls,
+     * is not an error: HIP records it as the last error (ROCm 6), CUDA does
+     * not. Every entry point runs and nothing is reported. */
+    {
+        gStream_t s;
+        gEvent_t ev;
+        gStreamCreate(&s);
+        gEventCreate(&ev);
+        for (int entry = 0; entry < 5; entry++) {
+            gMemcpy(a.p, h.data(), n * 4, gH2D);
+            gMemset(b.p, 0, n * 8);
+            gSync();
+            k_spin<<<1, 1, 0, s>>>(200000000LL);    /* about 0.1 s */
+            gEventRecord(ev, s);
+            const gError_t q = gEventQuery(ev);
+            CHECK(q == gErrorNotReady, "entry %d: query of a busy stream: %s", entry, gGetErrorName(q));
+            r = call_entry(entry, a.p, b.p, am.p, n);
+            CHECK(r == OMC_SUCCESS, "entry %d after a \"not ready\" query: %s (%s)", entry, omc_status_string(r),
+                  omc_last_error_detail());
+            gSync();
+            if (entry == 0) {
+                gMemcpy(b16.data(), b.p, n * 2, gD2H);
+                CHECK(b16[0] == 0x3e00 && b16[n - 1] == 0x3e00, "after a \"not ready\" query: 1.5 -> 0x%04x", b16[0]);
+            }
+        }
+        gGetLastError();
+        gEventDestroy(ev);
+        gStreamDestroy(s);
+    }
     /* a temporary too large for the GPU (transposed in place, 2^42 elements):
      * OMC_ERROR_ALLOCATION, the call and its error named, nothing left pending */
     omc_options_t t = {};
@@ -440,7 +492,7 @@ static void test_errors() {
     CHECK(left == gSuccess, "huge temporary: error left pending (%s)", gGetErrorName(left));
     r = omc_gpu_convert(F32, a.p, F16, b.p, n, nullptr, nullptr);
     CHECK(r == OMC_SUCCESS, "after the failed allocation: %s (%s)", omc_status_string(r), omc_last_error_detail());
-    printf("  errors (pending before the call, failed allocation): ok; detail \"%s\"\n", d);
+    printf("  errors (pending before the call, \"not ready\" before the call, failed allocation): ok; detail \"%s\"\n", d);
 }
 
 int main() {

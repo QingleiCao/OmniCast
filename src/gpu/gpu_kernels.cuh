@@ -632,7 +632,10 @@ k_cvtT_dyn(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n,
  *  clears it. */
 inline omc_status_t check_launch(const char *kernel) {
     const gpuError_t e = gpuGetLastError();
-    return (e == gpuSuccess) ? OMC_SUCCESS : device_error(OMC_ERROR_DEVICE, e, "launch of %s", kernel);
+    /* A launch does not fail with "not ready": that is an earlier query's
+     * status (see check_pending) */
+    return (e == gpuSuccess || e == gpuErrorNotReady)
+           ? OMC_SUCCESS : device_error(OMC_ERROR_DEVICE, e, "launch of %s", kernel);
 }
 
 inline bool aligned16(const void *p) { return ((uintptr_t)p & 15u) == 0; }
