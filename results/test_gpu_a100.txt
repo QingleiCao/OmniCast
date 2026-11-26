@@ -1,6 +1,0 @@
-OmniCast 2.0.0, GPU backend cuda, device NVIDIA A100-PCIE-40GB
-  all 196 pairs x 2 option sets, aligned and misaligned: 82436032 elements, bit-identical to the host
-  2-D / transposed / padded / stochastic: 896 cases, bit-identical to the host
-  in place (every pair, up to 1M elements, 4 concurrent streams x 20 calls): 1190 cases
-  scaling (host, device, dynamic power of two) and amax: ok
-PASSED

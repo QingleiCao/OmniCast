@@ -52,9 +52,9 @@ template <class S, class D> struct Vw {
  * from 4- and 2-byte sources (compute bound: fewer registers, more resident
  * warps). The macros are for such experiments. */
 /* Defaults measured on V100/H100 (CUDA) and the Radeon VII (HIP), see
- * docs/REPORT.md section 3.3. gfx906 prefers one vector per thread (fewer
- * VGPRs, more waves in flight): 1.1-1.3x over 4 rounds on narrowing and
- * widening conversions. */
+ * chapter 4 of docs/omnicast-2.1-report.pdf. gfx906 prefers one vector per
+ * thread (fewer VGPRs, more waves in flight): 1.1-1.3x over 4 rounds on
+ * narrowing and widening conversions. */
 #if defined(OMC_BACKEND_HIP)
 #define OMC_DEF_NARROW 1
 #define OMC_DEF_WIDEN 1

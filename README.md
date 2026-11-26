@@ -108,7 +108,7 @@ above which host conversions use streaming stores (0: never).
 `OMNICAST_FUSED_DYNAMIC=1` makes transposed GPU conversions with
 `OMC_SCALE_DYNAMIC_POW2` run as one cooperative kernel. That is faster when
 nothing else runs on the GPU, and slower beside kernels of other streams
-(`docs/REPORT.md`, section 5).
+(`docs/omnicast-2.1-report.pdf`, chapter 6).
 
 ## Design
 
@@ -134,9 +134,9 @@ nothing else runs on the GPU, and slower beside kernels of other streams
   the host; 2-D, transposed, padded, in place (including 4 concurrent streams),
   stochastic rounding against the HiCMA-X implementation, scaling.
 
-`docs/REPORT.md` is the full report (design, profiling, performance);
-`docs/DESIGN.md` has the design details and `docs/PERFORMANCE.md` the
-measurement tables.
+`docs/omnicast-2.1-report.pdf` is the full report (design, correctness,
+profiling and performance, with figures and tables); `docs/DESIGN.md` has the
+design details.
 
 ## License
 

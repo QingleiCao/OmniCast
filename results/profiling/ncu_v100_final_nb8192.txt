@@ -1,3 +1,0 @@
-
-## v100_final_nb8192.csv.gz  (nb = 8192)
-case             kernel                 us DRAM/min  DRAM%   SM% issue%  occ% regs inst/el L2hit  top stall reasons

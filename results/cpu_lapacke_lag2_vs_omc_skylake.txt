@@ -1,4 +1,0 @@
-nb=  256  dlag2s     79.4 us  omc d2s      9.7 us (8.16x) | slag2d     27.0 us  omc s2d     11.9 us (2.27x) | omc SR d2s    131.9 us
-nb=  512  dlag2s    335.1 us  omc d2s    119.3 us (2.81x) | slag2d    168.3 us  omc s2d    125.2 us (1.34x) | omc SR d2s    525.3 us
-nb= 1024  dlag2s   1379.4 us  omc d2s    479.8 us (2.87x) | slag2d    732.4 us  omc s2d    505.7 us (1.45x) | omc SR d2s   2095.7 us
-nb= 2048  dlag2s   7111.0 us  omc d2s   3080.7 us (2.31x) | slag2d   4666.1 us  omc s2d   4053.8 us (1.15x) | omc SR d2s   9366.5 us
