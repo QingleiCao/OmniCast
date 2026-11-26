@@ -1,5 +1,0 @@
-OmniCast 2.0.0: every pair x 9 option sets x 6 layouts, out of place / in place / dst == src
-  hip      out of place   15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
-  hip      in place       15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
-  hip      dst == src     15288 calls:  10224 converted,  5064 not supported (as the reference), 0 mismatches
-PASSED

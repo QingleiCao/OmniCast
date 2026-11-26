@@ -9,7 +9,8 @@
  * must give the reference status (stochastic rounding only exists for
  * narrowing float pairs, dynamic scaling only for float sources) and, when it
  * succeeds, the reference bits (NaN payloads aside) in the destination region.
- * The program prints the coverage table used in docs/PERFORMANCE.md.
+ * The program prints the coverage table of chapter 3 of
+ * docs/omnicast-2.1-report.pdf.
  */
 #include <cstdio>
 #include <cstdlib>
