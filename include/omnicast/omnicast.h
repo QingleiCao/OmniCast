@@ -127,6 +127,13 @@ omc_dtype_t omc_dtype_from_name(const char *name);   /**< inverse of omc_dtype_n
                                                           "float", "half", "int", ...; OMC_NUM_DTYPES if unknown */
 int         omc_dtype_is_float(omc_dtype_t t);
 const char *omc_status_string(omc_status_t s);
+/** What failed in the last GPU call of the calling thread that returned
+ *  OMC_ERROR_DEVICE or OMC_ERROR_ALLOCATION: the CUDA or HIP call, its error
+ *  name and description, for instance
+ *  "launch of k_cvt: cudaErrorLaunchOutOfResources (too many resources
+ *  requested for launch)". "" until such an error occurs. Successful calls
+ *  leave it as it is, so read it right after the call that failed. */
+const char *omc_last_error_detail(void);
 const char *omc_version_string(void);
 
 /** Name of the CPU code path in use: "avx512", "avx2", "neon", "generic". */

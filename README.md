@@ -74,6 +74,14 @@ All functions return an `omc_status_t`. The full reference is in
   or another rounding mode set, as optimizing Intel compilers and BLAS-heavy
   codes often do (x86-64 MXCSR, AArch64 FPCR). The caller's settings are
   restored on return. GPU kernels are built without flush-to-zero.
+- Errors: a GPU call that returns `OMC_ERROR_DEVICE` or `OMC_ERROR_ALLOCATION`
+  names the failed CUDA or HIP call and its error in `omc_last_error_detail()`
+  (per thread), for instance `cudaMalloc of 8796093022208 bytes (temporary):
+  cudaErrorMemoryAllocation (out of memory)`. A runtime error that is already
+  pending when a GPU call starts (an earlier call's error that nobody read)
+  is reported as such: the call returns `OMC_ERROR_DEVICE` without launching
+  anything, and the error stays pending for the code that caused it. Errors
+  of OmniCast's own calls are read after they are reported.
 
 ## Build
 

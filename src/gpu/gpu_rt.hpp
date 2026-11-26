@@ -18,6 +18,9 @@ typedef hipError_t  gpuError_t;
 #define gpuSuccess               hipSuccess
 #define gpuGetLastError          hipGetLastError
 #define gpuPeekAtLastError       hipPeekAtLastError
+#define gpuGetErrorName          hipGetErrorName
+#define gpuGetErrorString        hipGetErrorString
+#define OMC_RT                   "hip"     /* prefix of runtime call names in messages */
 #define gpuMemcpyAsync           hipMemcpyAsync
 #define gpuMemcpy2DAsync         hipMemcpy2DAsync
 #define gpuMemsetAsync           hipMemsetAsync
@@ -45,6 +48,9 @@ typedef cudaError_t  gpuError_t;
 #define gpuSuccess               cudaSuccess
 #define gpuGetLastError          cudaGetLastError
 #define gpuPeekAtLastError       cudaPeekAtLastError
+#define gpuGetErrorName          cudaGetErrorName
+#define gpuGetErrorString        cudaGetErrorString
+#define OMC_RT                   "cuda"    /* prefix of runtime call names in messages */
 #define gpuMemcpyAsync           cudaMemcpyAsync
 #define gpuMemcpy2DAsync         cudaMemcpy2DAsync
 #define gpuMemsetAsync           cudaMemsetAsync
@@ -124,6 +130,15 @@ inline size_t workspace_bytes_for(size_t count) {
 }
 
 using LaunchFn = omc_status_t (*)(const LaunchArgs &);
+
+/** Records a failed runtime call for omc_last_error_detail ("<where>: <error
+ *  name> (<description>)", where given in printf format) and returns s.
+ *  Defined in gpu_api.cu. */
+omc_status_t device_error(omc_status_t s, gpuError_t e, const char *where, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 3, 4)))
+#endif
+    ;
 
 /* one per source type, defined in gpu_inst_<type>.cu */
 #define OMC_DECLARE_LAUNCH(name) omc_status_t launch_src_##name(const LaunchArgs &a);

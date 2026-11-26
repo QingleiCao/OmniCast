@@ -1,4 +1,6 @@
-/** @file common.cpp  @brief Type and status queries. */
+/** @file common.cpp  @brief Type and status queries, error details. */
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include "omnicast/omnicast.h"
@@ -40,6 +42,16 @@ bool sr_supported(omc_dtype_t s, omc_dtype_t d) {
     if ((unsigned)s >= OMC_NUM_DTYPES || (unsigned)d >= OMC_NUM_DTYPES) return false;
     return rank[d] > 0 && rank[d] < rank[s];
 }
+
+/* omc_last_error_detail: one per thread, zero-initialized (""), no constructor */
+static thread_local char t_error_detail[512];
+
+void set_error_detail(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(t_error_detail, sizeof t_error_detail, fmt, ap);
+    va_end(ap);
+}
 }
 
 extern "C" {
@@ -67,6 +79,8 @@ const char *omc_status_string(omc_status_t s) {
     }
     return "unknown status";
 }
+
+const char *omc_last_error_detail(void) { return omc::t_error_detail; }
 
 /* OMC_VERSION_STRING comes from project(OmniCast VERSION ...) in CMakeLists.txt */
 const char *omc_version_string(void) { return OMC_VERSION_STRING; }
