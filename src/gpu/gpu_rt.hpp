@@ -16,6 +16,7 @@
 typedef hipStream_t gpuStream_t;
 typedef hipError_t  gpuError_t;
 #define gpuSuccess               hipSuccess
+#define gpuErrorNotReady         hipErrorNotReady
 #define gpuGetLastError          hipGetLastError
 #define gpuPeekAtLastError       hipPeekAtLastError
 #define gpuGetErrorName          hipGetErrorName
@@ -46,6 +47,7 @@ typedef hipError_t  gpuError_t;
 typedef cudaStream_t gpuStream_t;
 typedef cudaError_t  gpuError_t;
 #define gpuSuccess               cudaSuccess
+#define gpuErrorNotReady         cudaErrorNotReady
 #define gpuGetLastError          cudaGetLastError
 #define gpuPeekAtLastError       cudaPeekAtLastError
 #define gpuGetErrorName          cudaGetErrorName

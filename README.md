@@ -81,7 +81,10 @@ All functions return an `omc_status_t`. The full reference is in
   pending when a GPU call starts (an earlier call's error that nobody read)
   is reported as such: the call returns `OMC_ERROR_DEVICE` without launching
   anything, and the error stays pending for the code that caused it. Errors
-  of OmniCast's own calls are read after they are reported.
+  of OmniCast's own calls are read after they are reported. "Not ready"
+  (`cudaErrorNotReady`, `hipErrorNotReady`) is not an error: HIP (ROCm 6)
+  records it as the last error after an event or stream query of unfinished
+  work, as a runtime system polls; CUDA does not record it.
 
 ## Build
 

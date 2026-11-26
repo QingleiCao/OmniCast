@@ -39,7 +39,12 @@ One C header, `omnicast/omnicast.h`, used from C, C++, CUDA and HIP code.
   the runtime's error. Each public GPU entry point first peeks at the
   runtime's last error: one left pending by earlier code is reported as
   pending (nothing launched, error left in place) instead of coming back
-  from the launch check as a failure of OmniCast's kernel.
+  from the launch check as a failure of OmniCast's kernel. CUDA keeps an
+  error until it is read; HIP (ROCm 6.3) keeps the status of its last call,
+  successes included, so there a pending error is one of the call just
+  before. "Not ready" is not an error: HIP records it after an event or
+  stream query of unfinished work (a runtime system polls; HiCMA-X on
+  PaRSEC stopped on it with 2.1.0), CUDA does not.
 - **In place and out of place**: every type pair with every option (rounding,
   saturation, stochastic rounding, the three scale modes and their
   combinations, transposition, padding) runs out of place and in place, on
@@ -266,7 +271,7 @@ instantiations compile in parallel (35 s per architecture on 32 cores).
 |---|---|
 | `omnicast_exhaustive` | all 2^32 FP32 inputs → FP16/BF16/E4M3/E5M2, both saturation modes, against the CUDA headers; all codes → FP32; FP64 edge cases and 4M random values against an exact reference |
 | `omnicast_cpu` | every pair × 3 option sets × lengths 1..4099 (tails, misalignment) on every CPU path against the scalar core; stochastic rounding against HiCMA-X 0.2; 720 2-D/transposed/padded cases; in place for every pair (1-D and 2-D with ld > m); scaling, amax, threads, errors; 210 cases (14 pairs and option sets × 5 layouts × each CPU path), amax and the scalar functions computed again with FTZ, DAZ and rounding toward zero set in the caller and in the OpenMP threads, bit for bit; the SIMD FP8 encoders on every 47th FP32 pattern (`OMNICAST_TEST_FP8_STRIDE=1`: all), every FP16/BF16 pattern and FP64 edge values |
-| `omnicast_gpu` | every pair × 2 option sets × aligned/misaligned against the host; 896 2-D/transposed/padded/stochastic cases; in place for every pair up to 10^6 elements, 4 concurrent streams × 20 calls; dynamic and device scaling; 144 fused dynamic-scale transposed cases (float sources, nearest and stochastic, NaN/infinity, 1 to many tiles per block) and 4 concurrent streams × 8 calls with a different scale each; errors: a runtime error left pending before each entry point (reported as pending, left in place, nothing launched) and a temporary too large for the GPU (`OMC_ERROR_ALLOCATION`, named, not left pending) |
+| `omnicast_gpu` | every pair × 2 option sets × aligned/misaligned against the host; 896 2-D/transposed/padded/stochastic cases; in place for every pair up to 10^6 elements, 4 concurrent streams × 20 calls; dynamic and device scaling; 144 fused dynamic-scale transposed cases (float sources, nearest and stochastic, NaN/infinity, 1 to many tiles per block) and 4 concurrent streams × 8 calls with a different scale each; errors: a runtime error left pending before each entry point (reported as pending, left in place, nothing launched), a "not ready" event query before each entry point (no error), and a temporary too large for the GPU (`OMC_ERROR_ALLOCATION`, named, not left pending) |
 | `omnicast_native_fp8` | CUDA, sm_89+: the hardware FP8 encode against the integer encoder on all 2^32 FP32 inputs (E4M3, E5M2) and 2^30 FP64 values |
 | `omnicast_modes`, `omnicast_modes_gpu` | every pair × 9 option sets (default, saturate, nearest, host scale, device scale, dynamic scale, stochastic, stochastic + scale, stochastic + dynamic) × 6 layouts (1-D, 2-D, ld > m, transposed, padded, both) × {out of place, in place, dst == src}, small odd and multi-chunk sizes, aligned and not: 15288 calls per mode, against the generic host conversion, on every host code path and on the GPU |
 
