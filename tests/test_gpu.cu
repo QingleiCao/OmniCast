@@ -27,6 +27,11 @@
 #define gStreamDestroy hipStreamDestroy
 #define gStreamSync hipStreamSynchronize
 #define gGetDeviceProperties hipGetDeviceProperties
+#define gGetLastError hipGetLastError
+#define gPeekAtLastError hipPeekAtLastError
+#define gGetErrorName hipGetErrorName
+#define gSuccess hipSuccess
+typedef hipError_t gError_t;
 typedef hipDeviceProp_t gProp;
 #else
 #include <cuda_runtime.h>
@@ -42,6 +47,11 @@ typedef hipDeviceProp_t gProp;
 #define gStreamDestroy cudaStreamDestroy
 #define gStreamSync cudaStreamSynchronize
 #define gGetDeviceProperties cudaGetDeviceProperties
+#define gGetLastError cudaGetLastError
+#define gPeekAtLastError cudaPeekAtLastError
+#define gGetErrorName cudaGetErrorName
+#define gSuccess cudaSuccess
+typedef cudaError_t gError_t;
 typedef cudaDeviceProp gProp;
 #endif
 
@@ -374,6 +384,65 @@ static void test_dynamic_transpose() {
     printf("  dynamic scale + transpose (float sources, RN/SR, NaN/inf, %d concurrent streams): %d cases\n", 4, cases);
 }
 
+/* Errors: a runtime error the caller left pending is reported as such by
+ * every entry point, nothing is launched and the error stays pending; a
+ * failed allocation names the call and its error and is read (not left
+ * pending); a call after clearing works. */
+static void test_errors() {
+    const size_t n = 4096;
+    DBuf a(n * 8), b(n * 8), am(16);
+    std::vector<float> h(n, 1.5f), back(n, 0.0f);
+    gMemcpy(a.p, h.data(), n * 4, gH2D);
+    gMemset(b.p, 0, n * 8);
+    gSync();
+    const omc_dtype_t F32 = OMC_FP32, F16 = OMC_FP16;
+    for (int entry = 0; entry < 5; entry++) {
+        void *huge = nullptr;
+        const gError_t e0 = gMalloc(&huge, (size_t)1 << 60);    /* fails, leaves its error pending */
+        CHECK(e0 != gSuccess, "entry %d: allocating 2^60 bytes succeeded", entry);
+        if (e0 == gSuccess) { gFree(huge); continue; }
+        omc_status_t r = OMC_SUCCESS;
+        switch (entry) {
+        case 0: r = omc_gpu_convert(F32, a.p, F16, b.p, n, nullptr, nullptr); break;
+        case 1: r = omc_gpu_convert_2d(F32, a.p, 64, F16, b.p, 64, 64, (int64_t)n / 64, nullptr, nullptr); break;
+        case 2: r = omc_gpu_convert_inplace(F32, F16, b.p, n, nullptr, nullptr); break;
+        case 3: r = omc_gpu_convert_inplace_2d(F32, F16, b.p, 64, 64, (int64_t)n / 64, nullptr, nullptr); break;
+        case 4: r = omc_gpu_amax_2d(F32, a.p, 64, 64, (int64_t)n / 64, (float *)am.p, nullptr); break;
+        }
+        const char *d = omc_last_error_detail();
+        CHECK(r == OMC_ERROR_DEVICE, "entry %d with a pending error: %s", entry, omc_status_string(r));
+        CHECK(strstr(d, gGetErrorName(e0)) && strstr(d, "pending before the call"), "entry %d: detail \"%s\"", entry, d);
+        const gError_t still = gPeekAtLastError();
+        CHECK(still == e0, "entry %d: pending error not left in place (%s)", entry, gGetErrorName(still));
+        gGetLastError();
+    }
+    /* nothing was launched: b is still zero */
+    std::vector<uint16_t> b16(n, 1);
+    gMemcpy(b16.data(), b.p, n * 2, gD2H);
+    bool zero = true;
+    for (uint16_t v : b16) zero = zero && v == 0;
+    CHECK(zero, "a call with a pending error converted");
+    /* after clearing, the same call works */
+    omc_status_t r = omc_gpu_convert(F32, a.p, F16, b.p, n, nullptr, nullptr);
+    CHECK(r == OMC_SUCCESS, "after clearing: %s (%s)", omc_status_string(r), omc_last_error_detail());
+    gMemcpy(b16.data(), b.p, n * 2, gD2H);
+    CHECK(b16[0] == 0x3e00 && b16[n - 1] == 0x3e00, "after clearing: 1.5 -> 0x%04x", b16[0]);
+    /* a temporary too large for the GPU (transposed in place, 2^42 elements):
+     * OMC_ERROR_ALLOCATION, the call and its error named, nothing left pending */
+    omc_options_t t = {};
+    t.flags = OMC_FLAG_TRANSPOSE;
+    const int64_t big = (int64_t)1 << 21;
+    r = omc_gpu_convert_inplace_2d(F32, F16, b.p, big, big, big, &t, nullptr);
+    const char *d = omc_last_error_detail();
+    CHECK(r == OMC_ERROR_ALLOCATION, "huge temporary: %s", omc_status_string(r));
+    CHECK(strstr(d, "Malloc of 8796093022208 bytes (temporary): ") != nullptr, "huge temporary: detail \"%s\"", d);
+    const gError_t left = gPeekAtLastError();
+    CHECK(left == gSuccess, "huge temporary: error left pending (%s)", gGetErrorName(left));
+    r = omc_gpu_convert(F32, a.p, F16, b.p, n, nullptr, nullptr);
+    CHECK(r == OMC_SUCCESS, "after the failed allocation: %s (%s)", omc_status_string(r), omc_last_error_detail());
+    printf("  errors (pending before the call, failed allocation): ok; detail \"%s\"\n", d);
+}
+
 int main() {
     /* transposed conversions with a dynamic scale through the opt-in fused
      * kernel (omnicast_test_modes_gpu covers the default amax pass) */
@@ -386,6 +455,7 @@ int main() {
     test_inplace();
     test_scale();
     test_dynamic_transpose();
+    test_errors();
     omc_gpu_release_workspaces();
     printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;

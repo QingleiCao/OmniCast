@@ -625,8 +625,14 @@ k_cvtT_dyn(const S *src, int64_t lds, D *dst, int64_t ldd, int64_t m, int64_t n,
 /* Host-side launch                                                          */
 /* ------------------------------------------------------------------------ */
 
-inline omc_status_t check_launch() {
-    return (gpuGetLastError() == gpuSuccess) ? OMC_SUCCESS : OMC_ERROR_DEVICE;
+/** After a launch: OMC_ERROR_DEVICE, with the kernel and the error in
+ *  omc_last_error_detail, when the runtime has an error. The public entry
+ *  points have checked that none was pending before the call
+ *  (check_pending, gpu_api.cu), so it is an error of this call. Reading it
+ *  clears it. */
+inline omc_status_t check_launch(const char *kernel) {
+    const gpuError_t e = gpuGetLastError();
+    return (e == gpuSuccess) ? OMC_SUCCESS : device_error(OMC_ERROR_DEVICE, e, "launch of %s", kernel);
 }
 
 inline bool aligned16(const void *p) { return ((uintptr_t)p & 15u) == 0; }
@@ -646,7 +652,7 @@ omc_status_t launch_amax(const LaunchArgs &a, float *out, int write_scale) {
     k_amax<S><<<dim3((unsigned)gx, (unsigned)gy), kThreads, 0, a.stream>>>(
         static_cast<const S *>(a.src), a.lds, a.m, a.n, static_cast<uint32_t *>(a.ws), out, write_scale,
         a.scale_max, vec);
-    return check_launch();
+    return check_launch("k_amax");
 }
 
 /** k_cvtT_dyn as a cooperative kernel; an error (nothing launched) when the
@@ -713,7 +719,7 @@ omc_status_t launch_mode(const LaunchArgs &a) {
         if (gx > 0x7fffffff) return OMC_ERROR_NOT_SUPPORTED;
         k_cvt<S, D, MODE><<<dim3((unsigned)gx, (unsigned)gy), dim3(tx, ty), 0, a.stream>>>(
             src, a.lds, dst, a.ldd, a.m, a.n, a.dr, a.dc, op, a.scale_ptr, a.scale_index, vec);
-        return check_launch();
+        return check_launch("k_cvt");
     }
     case OP_TRANSPOSE: {
         const int64_t gx = (a.dc + 63) / 64;
@@ -729,12 +735,12 @@ omc_status_t launch_mode(const LaunchArgs &a) {
                 if (r != OMC_SUCCESS) return r;
                 k_cvtT<S, D, MODE><<<dim3((unsigned)gx, (unsigned)gy), kThreads, 0, a.stream>>>(
                     src, a.lds, dst, a.ldd, a.m, a.n, a.dr, a.dc, op, a.amax_out, 1, vec);
-                return check_launch();
+                return check_launch("k_cvtT");
             }
         }
         k_cvtT<S, D, MODE><<<dim3((unsigned)gx, (unsigned)gy), kThreads, 0, a.stream>>>(
             src, a.lds, dst, a.ldd, a.m, a.n, a.dr, a.dc, op, a.scale_ptr, a.scale_index, vec);
-        return check_launch();
+        return check_launch("k_cvtT");
     }
     case OP_INPLACE: {
         if constexpr (sizeof(S) == sizeof(D)) {
@@ -750,7 +756,7 @@ omc_status_t launch_mode(const LaunchArgs &a) {
             k_inplace<S, D, MODE><<<(unsigned)nchunks, kThreads, 0, a.stream>>>(
                 static_cast<char *>(a.dst), count, a.m, a.n > 1 ? ld : a.m, strided, vec, op,
                 a.scale_ptr, a.scale_index, static_cast<uint32_t *>(a.ws), (uint32_t)nchunks);
-            return check_launch();
+            return check_launch("k_inplace");
         }
     }
     default:
